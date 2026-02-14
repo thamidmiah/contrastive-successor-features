@@ -47,22 +47,16 @@ class NatureCNN(nn.Module):
         print(f"[NatureCNN] Compression: 28224 -> {output_dim} ({28224/output_dim:.1f}x)")
         
     def forward(self, x):
-        # Handle flattened input
-        if len(x.shape) == 2:
-            batch_size = x.shape[0]
-            
-            # CRITICAL: If input has extra dimensions (e.g., concatenated with option),
-            # extract only the observation part (first self.expected_obs_size elements)
-            if x.shape[1] > self.expected_obs_size:
-                x = x[:, :self.expected_obs_size]
-            
-            # Reshape to (batch, channels, height, width)
-            x = x.view(batch_size, self.in_channels, 84, 84)
+        """Forward pass. Expects 4D input (B, C, H, W). Reshape must happen upstream in _encode_obs."""
+        assert x.ndim == 4, (
+            f"NatureCNN.forward expects 4D input (B, C, H, W), got shape {x.shape}. "
+            f"Reshape flat→4D must happen in _encode_obs, not here."
+        )
         
         # Convolutional layers
         x = self.conv(x)
         
-        # Flatten
+        # Flatten conv output
         x = x.reshape(x.size(0), -1)
         
         # Fully connected
@@ -131,18 +125,11 @@ class ImpalaCNN(nn.Module):
         print(f"[ImpalaCNN] Deeper architecture with residual blocks")
         
     def forward(self, x):
-        """Forward pass through IMPALA CNN."""
-        # Handle flattened input
-        if len(x.shape) == 2:
-            batch_size = x.shape[0]
-            
-            # CRITICAL: If input has extra dimensions (e.g., concatenated with option),
-            # extract only the observation part (first self.expected_obs_size elements)
-            if x.shape[1] > self.expected_obs_size:
-                x = x[:, :self.expected_obs_size]
-            
-            # Reshape to (batch, channels, height, width)
-            x = x.view(batch_size, self.in_channels, 84, 84)
+        """Forward pass. Expects 4D input (B, C, H, W). Reshape must happen upstream in _encode_obs."""
+        assert x.ndim == 4, (
+            f"ImpalaCNN.forward expects 4D input (B, C, H, W), got shape {x.shape}. "
+            f"Reshape flat→4D must happen in _encode_obs, not here."
+        )
         
         # Convolutional stages
         x = self.stage1(x)

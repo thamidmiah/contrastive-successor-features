@@ -54,6 +54,12 @@ class PolicyEx(StochasticPolicy):
                 obs_only = observations[..., :-self._option_dim]
                 option = observations[..., -self._option_dim:]
                 
+                # Reshape flat → 4D before CNN (data is CHW from env, stored flat)
+                if obs_only.ndim == 2:
+                    C = self._obs_preprocessor.in_channels  # 4
+                    H = W = int((obs_only.shape[-1] // C) ** 0.5)  # 84
+                    obs_only = obs_only.view(-1, C, H, W)
+                
                 # Encode observation through CNN
                 encoded_obs = self._obs_preprocessor(obs_only)
                 
@@ -61,6 +67,11 @@ class PolicyEx(StochasticPolicy):
                 observations = torch.cat([encoded_obs, option], dim=-1)
             else:
                 # No option concatenated, just encode
+                # Reshape flat → 4D before CNN
+                if observations.ndim == 2 and observations.shape[-1] == expected_raw_size:
+                    C = self._obs_preprocessor.in_channels
+                    H = W = int((expected_raw_size // C) ** 0.5)
+                    observations = observations.view(-1, C, H, W)
                 observations = self._obs_preprocessor(observations)
         
         if self._omit_obs_idxs is not None:

@@ -184,18 +184,34 @@ class METRA(IOD):
         """
         return get_torch_concat_obs(obs, option)
     
-    def _encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
+    def _encode_obs(self, obs: torch.Tensor, detach: bool = False) -> torch.Tensor:
         """Encode observations through CNN if enabled.
         
+        Single source of truth for flat→4D reshape and detach control.
+        
         Args:
-            obs: Raw observations (batch, obs_dim) or (batch, channels, H, W)
+            obs: Observations — either (B, 28224) flat or (B, 4, 84, 84) 4D
+            detach: If True, detach encoded output (blocks gradients to CNN)
             
         Returns:
-            encoded: Encoded observations (batch, encoded_dim)
+            encoded: (B, 512) if CNN enabled, otherwise obs unchanged
         """
-        if self._use_cnn_encoder:
-            return self.cnn_encoder(obs)
-        return obs
+        if not self._use_cnn_encoder:
+            return obs
+        
+        # Reshape flat → 4D if needed (data is CHW from env, stored flat in buffer)
+        if obs.ndim == 2:
+            B = obs.shape[0]
+            obs = obs.view(B, 4, 84, 84)
+        
+        assert obs.ndim == 4, f"_encode_obs: expected 4D after reshape, got {obs.shape}"
+        
+        encoded = self.cnn_encoder(obs)  # (B, 512)
+        
+        if detach:
+            encoded = encoded.detach()
+        
+        return encoded
     
     def _compute_intrinsic_reward(self, obs: torch.Tensor, option: torch.Tensor) -> torch.Tensor:
         """Compute intrinsic reward from skill-state mutual information.
@@ -292,6 +308,9 @@ class METRA(IOD):
 
     def _sample_replay_buffer(self, batch_size: int = None) -> Dict[str, torch.tensor]:
         """Sample batch of transitions from the replay buffer.
+        
+        Buffer stores obs as flat (B, 28224). We keep them flat here.
+        Reshape to 4D happens in _encode_obs (single source of truth).
 
         Args:
             batch_size (int, optional): specifies the batch size. Defaults to None.
@@ -308,11 +327,6 @@ class METRA(IOD):
             if value.shape[1] == 1 and 'option' not in key:
                 value = np.squeeze(value, axis=1)
             
-            # Flatten observations if they're multi-dimensional (e.g., images)
-            if key in ['obs', 'next_obs'] and value.ndim > 2:
-                # Reshape from (batch, ...) to (batch, flat_dim)
-                value = value.reshape(value.shape[0], -1)
-            
             data[key] = torch.from_numpy(value).float().to(self.device)
 
         return data
@@ -327,17 +341,13 @@ class METRA(IOD):
             Dict: dictionary containing the training losses etc. for each component.
         """
         # Add trajectories to replay buffer
-        print(f"[DEBUG] _train_once_inner: Adding trajectories to replay buffer")
         self._update_replay_buffer(path_data)
-        print(f"[DEBUG] _train_once_inner: Replay buffer size = {self.replay_buffer.n_transitions_stored if self.replay_buffer else 'N/A'}")
 
         # Concatenate all trajectories together into one tensor
         epoch_data = self._flatten_data(path_data)
-        print(f"[DEBUG] _train_once_inner: Data flattened, starting component training")
 
         # Train all components
         tensors = self._train_components(epoch_data)
-        print(f"[DEBUG] _train_once_inner: Component training completed")
 
         return tensors
 
@@ -352,13 +362,18 @@ class METRA(IOD):
         """
         # Make sure replay buffer is used and has enough transitions
         if self.replay_buffer is not None and self.replay_buffer.n_transitions_stored < self.min_buffer_size:
-            print(f"[DEBUG] _train_components: Skipping - buffer not full enough ({self.replay_buffer.n_transitions_stored}/{self.min_buffer_size})")
             return {}
         
-        print(f"[DEBUG] _train_components: Starting {self._trans_optimization_epochs} optimization epochs")
-        for opt_epoch in range(self._trans_optimization_epochs):
-            if opt_epoch % 50 == 0 or opt_epoch == self._trans_optimization_epochs - 1:
-                print(f"[DEBUG] _train_components: Optimization epoch {opt_epoch}/{self._trans_optimization_epochs}")
+        import sys
+        n_epochs = self._trans_optimization_epochs
+        bar_width = 30
+        for opt_epoch in range(n_epochs):
+            # Progress bar
+            frac = (opt_epoch + 1) / n_epochs
+            filled = int(bar_width * frac)
+            bar = '█' * filled + '░' * (bar_width - filled)
+            sys.stdout.write(f'\r  Optimizing  [{bar}] {opt_epoch + 1}/{n_epochs}  {frac * 100:5.1f}%')
+            sys.stdout.flush()
             
             train_store = {}
 
@@ -377,7 +392,7 @@ class METRA(IOD):
             # Optimize the policy
             self._optimize_op(train_store, mini_batch)
 
-        print(f"[DEBUG] _train_components: All {self._trans_optimization_epochs} optimization epochs completed")
+        sys.stdout.write('\n')  # newline after progress bar
         return train_store
 
     def _optimize_te(self, train_store: Dict, mini_batch: Dict) -> None:
@@ -428,8 +443,8 @@ class METRA(IOD):
         
         # Compute hybrid rewards if using intrinsic component
         if self._alpha_intrinsic > 0:
-            # For intrinsic rewards, we need encoded observations
-            obs_encoded = self._encode_obs(mini_batch['obs']) if self._use_cnn_encoder else mini_batch['obs']
+            # For intrinsic rewards, we need encoded observations (detached — no grad needed)
+            obs_encoded = self._encode_obs(mini_batch['obs'], detach=True)
             intrinsic_rewards = self._compute_intrinsic_reward(obs_encoded, mini_batch['options'])
             # Add to training store for logging
             train_store['IntrinsicReward'] = intrinsic_rewards.mean().item()
@@ -478,9 +493,9 @@ class METRA(IOD):
         obs = mini_batch['obs']
         next_obs = mini_batch['next_obs']
         
-        # CRITICAL: Encode observations through CNN if enabled
-        obs = self._encode_obs(obs)
-        next_obs = self._encode_obs(next_obs)
+        # Encode observations — NOT detached: METRA loss trains the CNN
+        obs = self._encode_obs(obs, detach=False)
+        next_obs = self._encode_obs(next_obs, detach=False)
 
         if self.inner:
             cur_z = self.traj_encoder(obs).mean
@@ -670,13 +685,9 @@ class METRA(IOD):
             train_store (Dict[str, Any]): train store
             mini_batch (Dict[str, Any]): mini batch data
         """
-        # Encode observations if using CNN
-        if self._use_cnn_encoder:
-            obs = self._encode_obs(mini_batch['obs'])
-            next_obs = self._encode_obs(mini_batch['next_obs'])
-        else:
-            obs = mini_batch['obs']
-            next_obs = mini_batch['next_obs']
+        # Encode observations — DETACHED so critic cannot train CNN
+        obs = self._encode_obs(mini_batch['obs'], detach=True)
+        next_obs = self._encode_obs(mini_batch['next_obs'], detach=True)
         
         # Concatenate with options
         processed_cat_obs = self._get_concat_obs(obs, mini_batch['options'])
@@ -736,11 +747,8 @@ class METRA(IOD):
             train_store (Dict[str, Any]): train store
             mini_batch (Dict[str, Any]): mini batch data
         """
-        # Encode observations if using CNN
-        if self._use_cnn_encoder:
-            obs = self._encode_obs(mini_batch['obs'])
-        else:
-            obs = mini_batch['obs']
+        # Encode observations — DETACHED so policy cannot train CNN
+        obs = self._encode_obs(mini_batch['obs'], detach=True)
         
         # Concatenate with options
         processed_cat_obs = self._get_concat_obs(obs, mini_batch['options'])
