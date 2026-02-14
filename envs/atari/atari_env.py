@@ -1,8 +1,5 @@
 """
 Atari environment wrapper with preprocessing.
-
-Phase 1: Basic environment integration
-Phase 2: Standard Atari preprocessing (grayscale, resize, frame stack, normalize)
 """
 
 import gymnasium as gym
@@ -27,14 +24,9 @@ class NormalizePixels(gym.ObservationWrapper):
 
 
 class FrameStackWrapper(gym.Wrapper):
-    """
-    Stack frames manually to avoid issues with squeezed dimensions.
-    
-    This is a simpler implementation that handles 2D or 3D observations.
-    """
     
     def __init__(self, env, num_frames=4):
-        """Initialize frame stack."""
+        """Initialise frame stack."""
         super().__init__(env)
         self.num_frames = num_frames
         self.frames = None
@@ -58,7 +50,7 @@ class FrameStackWrapper(gym.Wrapper):
         )
     
     def reset(self, **kwargs):
-        """Reset and initialize frame stack."""
+        """Reset and initialise frame stack."""
         obs = self.env.reset(**kwargs)
         if isinstance(obs, tuple):
             obs = obs[0] if len(obs) > 0 else obs
@@ -127,7 +119,7 @@ class AtariEnv(gym.Wrapper):
         frame_stack=1,
         normalize_pixels=False,
     ):
-        """Initialize the Atari environment with preprocessing."""
+        """Initialise the Atari environment with preprocessing."""
         # Create base environment
         env = gym.make(f'ALE/{game}-v5', render_mode='rgb_array')
         
@@ -153,7 +145,6 @@ class AtariEnv(gym.Wrapper):
         
         super().__init__(env)
         
-        # Get a dummy observation to determine final shape and dtype
         reset_result = env.reset()
         if isinstance(reset_result, tuple):
             dummy_obs = reset_result[0]
@@ -164,7 +155,6 @@ class AtariEnv(gym.Wrapper):
             dummy_obs = np.array(dummy_obs)
         
         # Create observation space that matches actual observations
-        # (normalize_pixels changes dtype from uint8 to float32 and range from [0,255] to [0,1])
         actual_obs_space = Box(
             low=0.0 if normalize_pixels else 0,
             high=1.0 if normalize_pixels else 255,
