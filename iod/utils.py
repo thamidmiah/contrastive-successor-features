@@ -11,7 +11,13 @@ import torch
 import platform
 if 'macOS' in platform.platform():
     os.environ["IMAGEIO_FFMPEG_EXE"] = '/opt/homebrew/bin/ffmpeg'
-from moviepy import editor as mpy
+try:
+    from moviepy import editor as mpy
+except ImportError:
+    # New moviepy API
+    from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+    class mpy:
+        ImageSequenceClip = ImageSequenceClip
 from garage.misc.tensor_utils import discount_cumsum
 from matplotlib import figure
 from matplotlib.patches import Ellipse
@@ -133,7 +139,9 @@ def get_torch_concat_obs(obs: torch.Tensor, option: torch.Tensor, dim: int=1) ->
 
 
 def get_np_concat_obs(obs, option):
-    concat_obs = np.concatenate([obs] + [option])
+    # Flatten obs if it's multi-dimensional (e.g., Atari frames)
+    flat_obs = obs.flatten() if obs.ndim > 1 else obs
+    concat_obs = np.concatenate([flat_obs] + [option])
     return concat_obs
 
 def get_normalizer_preset(normalizer_type, coord_only: bool = False):
@@ -340,6 +348,11 @@ def save_video(runner, label, tensor, fps=15, n_cols=None):
 
 
 def record_video(runner, label, trajectories, n_cols=None, skip_frames=1):
+    # Check if trajectories have rendered frames (skip video recording if not)
+    if not trajectories or 'env_infos' not in trajectories[0] or 'render' not in trajectories[0]['env_infos']:
+        print(f"[record_video] Skipping {label} - environment doesn't provide rendered frames")
+        return
+    
     renders = []
     for trajectory in trajectories:
         render = trajectory['env_infos']['render']

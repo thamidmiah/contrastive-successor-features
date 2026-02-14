@@ -149,16 +149,29 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         )
         cp_num_truncate_obs = 2
     
+    elif args.env.startswith('atari_'):
+        # NEW: Atari environment support
+        from envs.atari.atari_env import AtariEnv
+        game_name = args.env.replace('atari_', '').replace('_', ' ').title().replace(' ', '')
+        frame_stack = args.frame_stack if args.frame_stack is not None else 4
+        env = AtariEnv(game=game_name, frame_stack=frame_stack, normalize_pixels=True)
+        normalizer_type = 'off'  # No normalization for pixel observations
+    
     else:
         raise NotImplementedError
 
-    if args.frame_stack is not None:
+    # Only apply external frame stacking for non-Atari environments  
+    if args.frame_stack is not None and not args.env.startswith('atari_'):
         from envs.custom_dmc_tasks.pixel_wrappers import FrameStackWrapper
         env = FrameStackWrapper(env, args.frame_stack)
 
     # Potentially add normalization wrappers
     normalizer_type = args.normalizer_type
     normalizer_kwargs = {}
+    
+    # Don't flatten observations for Atari (keep 3D structure for CNN)
+    if args.env.startswith('atari_'):
+        normalizer_kwargs['flatten_obs'] = False
 
     if normalizer_type == 'off':
         env = consistent_normalize(env, normalize_obs=False, **normalizer_kwargs)
@@ -234,7 +247,9 @@ def get_argparser():
         # Exploration & goal reaching environments
         'ant', 'half_cheetah', 'dmc_quadruped', 'dmc_humanoid', 'kitchen', 'robobin_image',
         # Hierarchical control environments
-        'ant_nav_prime', 'half_cheetah_hurdle', 'half_cheetah_goal', 'dmc_quadruped_goal', 'dmc_humanoid_goal'
+        'ant_nav_prime', 'half_cheetah_hurdle', 'half_cheetah_goal', 'dmc_quadruped_goal', 'dmc_humanoid_goal',
+        # Atari environments
+        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge'
     ])
 
     # Training

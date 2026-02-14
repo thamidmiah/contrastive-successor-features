@@ -135,8 +135,10 @@ class IOD(RLAlgorithm):
         time_computing_metrics = [0.0]
         time_training = [0.0]
 
+        print(f"[DEBUG] train_once started for epoch {itr}")
         with MeasureAndAccTime(time_training):
             tensors = self._train_once_inner(data)
+        print(f"[DEBUG] train_once completed for epoch {itr} in {time_training[0]:.2f}s")
 
         performence = log_performance_ex(
             itr,

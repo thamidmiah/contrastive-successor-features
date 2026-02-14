@@ -189,6 +189,10 @@ class METRA(IOD):
                     cur_list = data[key][i]
                     if cur_list.ndim == 1:
                         cur_list = cur_list[..., np.newaxis]
+                    # Flatten observations if they're multi-dimensional (e.g., images)
+                    elif key in ['obs', 'next_obs'] and cur_list.ndim > 2:
+                        # Reshape from (timesteps, ...) to (timesteps, flat_dim)
+                        cur_list = cur_list.reshape(cur_list.shape[0], -1)
                     path[key] = cur_list
                 self.replay_buffer.add_path(path)
 
@@ -209,6 +213,12 @@ class METRA(IOD):
         for key, value in samples.items():
             if value.shape[1] == 1 and 'option' not in key:
                 value = np.squeeze(value, axis=1)
+            
+            # Flatten observations if they're multi-dimensional (e.g., images)
+            if key in ['obs', 'next_obs'] and value.ndim > 2:
+                # Reshape from (batch, ...) to (batch, flat_dim)
+                value = value.reshape(value.shape[0], -1)
+            
             data[key] = torch.from_numpy(value).float().to(self.device)
 
         return data
@@ -223,13 +233,17 @@ class METRA(IOD):
             Dict: dictionary containing the training losses etc. for each component.
         """
         # Add trajectories to replay buffer
+        print(f"[DEBUG] _train_once_inner: Adding trajectories to replay buffer")
         self._update_replay_buffer(path_data)
+        print(f"[DEBUG] _train_once_inner: Replay buffer size = {self.replay_buffer.n_transitions_stored if self.replay_buffer else 'N/A'}")
 
         # Concatenate all trajectories together into one tensor
         epoch_data = self._flatten_data(path_data)
+        print(f"[DEBUG] _train_once_inner: Data flattened, starting component training")
 
         # Train all components
         tensors = self._train_components(epoch_data)
+        print(f"[DEBUG] _train_once_inner: Component training completed")
 
         return tensors
 
@@ -244,9 +258,14 @@ class METRA(IOD):
         """
         # Make sure replay buffer is used and has enough transitions
         if self.replay_buffer is not None and self.replay_buffer.n_transitions_stored < self.min_buffer_size:
+            print(f"[DEBUG] _train_components: Skipping - buffer not full enough ({self.replay_buffer.n_transitions_stored}/{self.min_buffer_size})")
             return {}
         
-        for _ in range(self._trans_optimization_epochs):
+        print(f"[DEBUG] _train_components: Starting {self._trans_optimization_epochs} optimization epochs")
+        for opt_epoch in range(self._trans_optimization_epochs):
+            if opt_epoch % 50 == 0 or opt_epoch == self._trans_optimization_epochs - 1:
+                print(f"[DEBUG] _train_components: Optimization epoch {opt_epoch}/{self._trans_optimization_epochs}")
+            
             train_store = {}
 
             # Sample mini batch
@@ -264,6 +283,7 @@ class METRA(IOD):
             # Optimize the policy
             self._optimize_op(train_store, mini_batch)
 
+        print(f"[DEBUG] _train_components: All {self._trans_optimization_epochs} optimization epochs completed")
         return train_store
 
     def _optimize_te(self, train_store: Dict, mini_batch: Dict) -> None:
@@ -638,14 +658,19 @@ class METRA(IOD):
             env_update=dict(_action_noise_std=None),
         )
 
-        # Visualize trajectories
-        with FigManager(runner, 'TrajPlot_RandomZ') as fm:
-            runner._env.render_trajectories(
-                random_trajectories, random_option_colors, self.eval_plot_axis, fm.ax
-            )
+        # Visualize trajectories (skip if environment doesn't support rendering)
+        if hasattr(runner._env, 'render_trajectories'):
+            with FigManager(runner, 'TrajPlot_RandomZ') as fm:
+                runner._env.render_trajectories(
+                    random_trajectories, random_option_colors, self.eval_plot_axis, fm.ax
+                )
 
         data = self.process_samples(random_trajectories)
         last_obs = torch.stack([torch.from_numpy(ob[-1]).to(self.device) for ob in data['obs']])
+        
+        # Flatten observations if they're multi-dimensional (e.g., images)
+        if last_obs.ndim > 2:
+            last_obs = last_obs.flatten(start_dim=1)
         
         option_dists = self.traj_encoder(last_obs)
 
@@ -899,7 +924,8 @@ class METRA(IOD):
             record_video(runner, 'Video_RandomZ', video_trajectories, skip_frames=self.video_skip_frames)
 
         # Logging
-        eval_option_metrics.update(runner._env.calc_eval_metrics(random_trajectories, is_option_trajectories=True))
+        if hasattr(runner._env, 'calc_eval_metrics'):
+            eval_option_metrics.update(runner._env.calc_eval_metrics(random_trajectories, is_option_trajectories=True))
         with global_context.GlobalContext({'phase': 'eval', 'policy': 'option'}):
             log_performance_ex(
                 runner.step_itr,

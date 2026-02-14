@@ -29,7 +29,14 @@ def update_loss_qf(
         alpha = algo.log_alpha.param.exp()
 
     if use_discrete_sac:
-        action_ids = action_ids = torch.argmax(actions.long(),dim=-1)
+        # Check if actions are already integer indices or one-hot vectors
+        if actions.dim() == 1 or (actions.dim() == 2 and actions.shape[1] == 1):
+            # Actions are already integer indices
+            action_ids = actions.long().flatten()
+        else:
+            # Actions are one-hot or probability vectors - take argmax
+            action_ids = torch.argmax(actions.long(), dim=-1)
+        
         q1_pred = algo.qf1(obs).gather(1, action_ids.view(-1, 1)).squeeze()
         q2_pred = algo.qf2(obs).gather(1, action_ids.view(-1, 1)).squeeze()
     else:
