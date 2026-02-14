@@ -15,6 +15,7 @@ from garagei.replay_buffer.path_buffer_ex import PathBufferEx
 from garagei.experiment.option_local_runner import OptionLocalRunner
 
 from iod.utils import get_torch_concat_obs, FigManager, get_option_colors, record_video, draw_2d_gaussians
+from iod.cnn_encoder import NatureCNN, ImpalaCNN
 
 class METRA(IOD):
     """This class implements the original METRA algorithm from the paper "METRA: Scalable Unsupervised RL with Metric-Aware Abstraction" (https://arxiv.org/abs/2310.08887).
@@ -54,9 +55,58 @@ class METRA(IOD):
             diayn_include_baseline: bool = False,
             uniform_z: bool = False,
             num_zero_shot_goals: int = 50,
+            use_cnn_encoder: bool = False,
+            cnn_type: str = 'nature',
+            alpha_intrinsic: float = 0.0,
+            cnn_learning_rate: float = 1e-4,
+            cnn_encoder: torch.nn.Module = None,  # Pre-created CNN encoder (optional, shared with policy)
             **kwargs,
     ):
         super().__init__(**kwargs)
+
+        # CNN Encoder setup
+        self._use_cnn_encoder = use_cnn_encoder
+        self._cnn_type = cnn_type
+        self._alpha_intrinsic = alpha_intrinsic
+        
+        # Get observation dimension from env_spec
+        obs_dim = self._env_spec.observation_space.flat_dim
+        
+        if self._use_cnn_encoder:
+            # Use pre-created CNN encoder if provided (shared with policy), otherwise create new one
+            if cnn_encoder is not None:
+                self.cnn_encoder = cnn_encoder
+                print(f"[METRA] Using SHARED CNN encoder (already created for policy)")
+                print(f"[METRA] Intrinsic reward weight: α={alpha_intrinsic}")
+            else:
+                # Create new CNN encoder (fallback if not provided)
+                print(f"[METRA] Creating NEW {cnn_type.upper()} CNN encoder")
+                print(f"[METRA] Intrinsic reward weight: α={alpha_intrinsic}")
+                
+                if cnn_type == 'nature':
+                    self.cnn_encoder = NatureCNN(
+                        in_channels=4,  # Frame stack
+                        output_dim=512
+                    ).to(self.device)
+                elif cnn_type == 'impala':
+                    self.cnn_encoder = ImpalaCNN(
+                        in_channels=4,
+                        output_dim=512
+                    ).to(self.device)
+                else:
+                    raise ValueError(f"Unknown CNN type: {cnn_type}")
+            
+            # CNN optimizer will be managed by OptimizerGroupWrapper in run/train.py
+            self.cnn_optimizer = None
+            
+            # Encoded observation dimension
+            self._encoded_obs_dim = 512
+            print(f"[METRA] Observation encoding: {obs_dim} -> {self._encoded_obs_dim}")
+            print(f"[METRA] CNN will be optimized by OptimizerGroupWrapper")
+        else:
+            self._encoded_obs_dim = obs_dim
+            print(f"[METRA] Using MLP encoder (no CNN)")
+            print(f"[METRA] Observation dim: {obs_dim}")
 
         # Q networks
         self.qf1 = qf1.to(self.device)
@@ -133,6 +183,50 @@ class METRA(IOD):
             torch.Tensor: concatenated observation tensor
         """
         return get_torch_concat_obs(obs, option)
+    
+    def _encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        """Encode observations through CNN if enabled.
+        
+        Args:
+            obs: Raw observations (batch, obs_dim) or (batch, channels, H, W)
+            
+        Returns:
+            encoded: Encoded observations (batch, encoded_dim)
+        """
+        if self._use_cnn_encoder:
+            return self.cnn_encoder(obs)
+        return obs
+    
+    def _compute_intrinsic_reward(self, obs: torch.Tensor, option: torch.Tensor) -> torch.Tensor:
+        """Compute intrinsic reward from skill-state mutual information.
+        
+        Intrinsic reward = how well the state discriminates the skill.
+        Higher when state clearly indicates which skill is being executed.
+        
+        Args:
+            obs: Encoded observations (batch, encoded_dim)
+            option: Skill indices (batch, dim_option)
+            
+        Returns:
+            intrinsic_reward: (batch,) intrinsic reward values
+        """
+        if self._alpha_intrinsic == 0.0:
+            return torch.zeros(obs.shape[0], device=self.device)
+        
+        # Get trajectory encoding
+        with torch.no_grad():
+            te_output = self.traj_encoder(obs)
+            
+            if self.discrete:
+                # For discrete skills: get skill probabilities
+                option_idx = torch.argmax(option, dim=-1)
+                log_probs = torch.log_softmax(te_output, dim=-1)
+                intrinsic = log_probs[torch.arange(len(option_idx)), option_idx]
+            else:
+                # For continuous skills: use similarity
+                intrinsic = torch.sum(te_output * option, dim=-1)
+        
+        return intrinsic.detach()
 
     def _get_train_trajectories_kwargs(self, runner: OptionLocalRunner) -> Dict:
         """Generate train trajectory arguments which are basically just the options (skills).
@@ -297,10 +391,18 @@ class METRA(IOD):
         self._update_loss_te(train_store, mini_batch)
 
         # Perform one step of gradient descent
-        self._gradient_descent(
-            train_store['LossTe'],
-            optimizer_keys=(['traj_encoder'] if not self.metra_mlp_rep else ['f_encoder']),
-        )
+        if self._use_cnn_encoder:
+            # Update trajectory encoder and CNN encoder together
+            self._gradient_descent(
+                train_store['LossTe'],
+                optimizer_keys=(['traj_encoder', 'cnn'] if not self.metra_mlp_rep else ['f_encoder', 'cnn']),
+            )
+        else:
+            # Update trajectory encoder only
+            self._gradient_descent(
+                train_store['LossTe'],
+                optimizer_keys=(['traj_encoder'] if not self.metra_mlp_rep else ['f_encoder']),
+            )
 
         # If using, perform dual gradient descent on lambda
         if self.dual_reg and self.fixed_lam is None and not self.log_sum_exp:
@@ -320,10 +422,26 @@ class METRA(IOD):
             train_store (Dict): dictionary to store training losses
             mini_batch (Dict): dictionary containing the mini batch data
         """
+        # Note: We do NOT encode observations here anymore.
+        # Each component (_update_loss_qf, _update_loss_op) will encode observations
+        # as needed, to avoid issues with computation graph being freed after first backward.
+        
+        # Compute hybrid rewards if using intrinsic component
+        if self._alpha_intrinsic > 0:
+            # For intrinsic rewards, we need encoded observations
+            obs_encoded = self._encode_obs(mini_batch['obs']) if self._use_cnn_encoder else mini_batch['obs']
+            intrinsic_rewards = self._compute_intrinsic_reward(obs_encoded, mini_batch['options'])
+            # Add to training store for logging
+            train_store['IntrinsicReward'] = intrinsic_rewards.mean().item()
+            train_store['TaskReward'] = mini_batch['rewards'].mean().item()
+            # Combine task and intrinsic rewards
+            mini_batch['rewards'] = mini_batch['rewards'] + self._alpha_intrinsic * intrinsic_rewards
+            train_store['TotalReward'] = mini_batch['rewards'].mean().item()
+        
         # Compute Q function loss
         self._update_loss_qf(train_store, mini_batch)
 
-        # Update both Q networks
+        # Update Q networks only (not CNN - CNN will be updated from policy loss)
         self._gradient_descent(
             train_store['LossQf1'] + train_store['LossQf2'],
             optimizer_keys=['qf'],
@@ -332,7 +450,7 @@ class METRA(IOD):
         # Compute policy loss
         self._update_loss_op(train_store, mini_batch)
 
-        # Update policy
+        # Update policy only (not CNN - CNN is updated from trajectory encoder loss)
         self._gradient_descent(
             train_store['LossSacp'],
             optimizer_keys=['option_policy'],
@@ -359,6 +477,10 @@ class METRA(IOD):
         """
         obs = mini_batch['obs']
         next_obs = mini_batch['next_obs']
+        
+        # CRITICAL: Encode observations through CNN if enabled
+        obs = self._encode_obs(obs)
+        next_obs = self._encode_obs(next_obs)
 
         if self.inner:
             cur_z = self.traj_encoder(obs).mean
@@ -520,9 +642,17 @@ class METRA(IOD):
             train_store (Dict[str, Any]): train store
             mini_batch (Dict[str, Any]): mini batch data
         """
-        # Concatenate options with observations
-        processed_cat_obs = self._get_concat_obs(self.option_policy.process_observations(mini_batch['obs']), mini_batch['options'])
-        next_processed_cat_obs = self._get_concat_obs(self.option_policy.process_observations(mini_batch['next_obs']), mini_batch['next_options'])
+        # Encode observations if using CNN
+        if self._use_cnn_encoder:
+            obs = self._encode_obs(mini_batch['obs'])
+            next_obs = self._encode_obs(mini_batch['next_obs'])
+        else:
+            obs = mini_batch['obs']
+            next_obs = mini_batch['next_obs']
+        
+        # Concatenate with options
+        processed_cat_obs = self._get_concat_obs(obs, mini_batch['options'])
+        next_processed_cat_obs = self._get_concat_obs(next_obs, mini_batch['next_options'])
 
         rewards = mini_batch['rewards'] * self._reward_scale_factor
 
@@ -576,8 +706,14 @@ class METRA(IOD):
             train_store (Dict[str, Any]): train store
             mini_batch (Dict[str, Any]): mini batch data
         """
-        # Concatenate options with observations
-        processed_cat_obs = self._get_concat_obs(self.option_policy.process_observations(mini_batch['obs']), mini_batch['options'])
+        # Encode observations if using CNN
+        if self._use_cnn_encoder:
+            obs = self._encode_obs(mini_batch['obs'])
+        else:
+            obs = mini_batch['obs']
+        
+        # Concatenate with options
+        processed_cat_obs = self._get_concat_obs(obs, mini_batch['options'])
 
         # Compute policy loss
         sac_utils.update_loss_sacp(
@@ -671,6 +807,9 @@ class METRA(IOD):
         # Flatten observations if they're multi-dimensional (e.g., images)
         if last_obs.ndim > 2:
             last_obs = last_obs.flatten(start_dim=1)
+        
+        # CRITICAL: Encode observations through CNN if enabled
+        last_obs = self._encode_obs(last_obs)
         
         option_dists = self.traj_encoder(last_obs)
 
@@ -787,6 +926,7 @@ class METRA(IOD):
                         if self.inner:
                             if self.no_diff_in_rep: 
                                 te_input = torch.from_numpy(goal_obs[None, ...]).to(self.device)
+                                te_input = self._encode_obs(te_input)  # Encode through CNN
                                 phi = self.traj_encoder(te_input).mean[0]
 
                                 if self.self_normalizing:
@@ -799,6 +939,7 @@ class METRA(IOD):
                                     option = phi
                             else:
                                 te_input = torch.from_numpy(np.stack([obs, goal_obs])).to(self.device)
+                                te_input = self._encode_obs(te_input)  # Encode through CNN
                                 phi_s, phi_g = self.traj_encoder(te_input).mean
                                 phi_s, phi_g = phi_s.detach().cpu().numpy(), phi_g.detach().cpu().numpy()
                                 if self.discrete:
@@ -811,6 +952,7 @@ class METRA(IOD):
                                     option = (phi_g - phi_s) / np.linalg.norm(phi_g - phi_s) * mean_length
                         else:
                             te_input = torch.from_numpy(goal_obs[None, ...]).to(self.device)
+                            te_input = self._encode_obs(te_input)  # Encode through CNN
                             phi = self.traj_encoder(te_input).mean[0]
                             phi = phi.detach().cpu().numpy()
                             if self.discrete:

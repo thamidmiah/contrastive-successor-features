@@ -153,6 +153,11 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         # NEW: Atari environment support
         from envs.atari.atari_env import AtariEnv
         game_name = args.env.replace('atari_', '').replace('_', ' ').title().replace(' ', '')
+        
+        # Special case for MsPacman (needs capital M and P)
+        if game_name == 'Mspacman':
+            game_name = 'MsPacman'
+        
         frame_stack = args.frame_stack if args.frame_stack is not None else 4
         env = AtariEnv(game=game_name, frame_stack=frame_stack, normalize_pixels=True)
         normalizer_type = 'off'  # No normalization for pixel observations
@@ -234,6 +239,12 @@ def get_argparser():
     # Architecture
     parser.add_argument('--encoder', type=int, default=0, help="Only used for image-based environments, where we add a simple CNN encoder to encode the image.")
     parser.add_argument('--spectral_normalization', type=int, default=0, choices=[0, 1])
+    
+    # CNN Encoder (for Atari)
+    parser.add_argument('--use_cnn_encoder', type=int, default=0, choices=[0, 1], help="Use CNN encoder for visual observations (Atari)")
+    parser.add_argument('--cnn_type', type=str, default='nature', choices=['nature', 'impala'], help="Type of CNN architecture")
+    parser.add_argument('--alpha_intrinsic', type=float, default=0.0, help="Weight for intrinsic curiosity reward")
+    
     parser.add_argument('--model_master_dim', type=int, default=1024)
     parser.add_argument('--model_master_num_layers', type=int, default=2)
     parser.add_argument('--model_master_nonlinearity', type=str, default=None, choices=['relu', 'tanh'])
@@ -249,7 +260,7 @@ def get_argparser():
         # Hierarchical control environments
         'ant_nav_prime', 'half_cheetah_hurdle', 'half_cheetah_goal', 'dmc_quadruped_goal', 'dmc_humanoid_goal',
         # Atari environments
-        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge'
+        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge', 'atari_mspacman'
     ])
 
     # Training
@@ -428,6 +439,25 @@ def run(ctxt=None):
     else:
         module_obs_dim = obs_dim
 
+    # *******************************************
+    # Setup CNN encoder (if enabled) - SHARED between policy and METRA
+    # *******************************************
+    shared_cnn_encoder = None
+    if args.use_cnn_encoder:
+        from iod.cnn_encoder import NatureCNN, ImpalaCNN
+        
+        if args.cnn_type == 'nature':
+            shared_cnn_encoder = NatureCNN(in_channels=4, output_dim=512).to(device)
+        else:
+            shared_cnn_encoder = ImpalaCNN(in_channels=4, output_dim=512).to(device)
+        
+        print(f"[Setup] Created shared CNN encoder ({args.cnn_type}) for policy and METRA")
+        
+        # CRITICAL: Update module_obs_dim to CNN output dimension
+        # Policy and Q-networks should accept CNN features (512), not raw pixels (28224)
+        module_obs_dim = 512
+        print(f"[Setup] Updated module_obs_dim: {obs_dim} -> {module_obs_dim} (CNN encoding)")
+
     # ********************
     # Setup policy network
     # ********************
@@ -480,6 +510,13 @@ def run(ctxt=None):
 
     policy_kwargs['module'] = policy_module
     option_policy = PolicyEx(**policy_kwargs)
+    
+    # Assign shared CNN encoder to policy's preprocessor
+    if shared_cnn_encoder is not None:
+        option_policy._obs_preprocessor = shared_cnn_encoder
+        option_policy._option_dim = args.dim_option  # Set option dimension for proper handling
+        print(f"[Setup] Assigned shared CNN encoder to policy preprocessor")
+        print(f"[Setup] Policy will separate option ({args.dim_option} dims) from obs before CNN encoding")
 
     # ************************
     # Setup trajectory encoder
@@ -685,6 +722,15 @@ def run(ctxt=None):
             ])
         })
     
+    # Add CNN optimizer if using CNN encoder
+    if shared_cnn_encoder is not None:
+        optimizers.update({
+            'cnn': torch.optim.Adam([
+                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
+            ])
+        })
+        print(f"[Setup] Added CNN optimizer with learning rate {_finalize_lr(args.sac_lr_q)}")
+    
     # NOTE: for metra_sf, the q networks are really just the "psi" successor features that 
     # are learned in the same way as the q functions in the other algorithms
     elif args.algo == 'metra_sf':
@@ -717,6 +763,15 @@ def run(ctxt=None):
                 {'params': log_alpha.parameters(), 'lr': _finalize_lr(args.sac_lr_a)},
             ])
         })
+    
+    # Add CNN optimizer if using CNN encoder (for metra_sf case)
+    if shared_cnn_encoder is not None and args.algo == 'metra_sf':
+        optimizers.update({
+            'cnn': torch.optim.Adam([
+                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
+            ])
+        })
+        print(f"[Setup] Added CNN optimizer (metra_sf) with learning rate {_finalize_lr(args.sac_lr_q)}")
 
     elif args.algo == 'ppo':
         # TODO: Currently not support pixel obs
@@ -838,6 +893,17 @@ def run(ctxt=None):
             dual_slack=args.dual_slack,
             dual_dist=args.dual_dist,
         )
+        
+        # Add CNN parameters if using CNN encoder
+        if args.use_cnn_encoder:
+            algo_kwargs.update(
+                use_cnn_encoder=True,
+                cnn_type=args.cnn_type,
+                alpha_intrinsic=args.alpha_intrinsic,
+                cnn_learning_rate=args.common_lr,
+                cnn_encoder=shared_cnn_encoder,  # Pass the shared CNN encoder
+            )
+        
         algo = METRA(
             **algo_kwargs,
             **skill_common_args,

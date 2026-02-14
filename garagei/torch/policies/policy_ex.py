@@ -24,8 +24,45 @@ class PolicyEx(StochasticPolicy):
         self._force_use_mode_actions = force_use_mode_actions
 
         self._module = module
+        self._obs_preprocessor = None  # Can be set to a CNN encoder later
+        self._option_dim = 0  # Set this when using options with CNN encoder
 
     def process_observations(self, observations):
+        # If CNN preprocessor is set, encode observations first
+        if self._obs_preprocessor is not None:
+            if not isinstance(observations, torch.Tensor):
+                observations = torch.as_tensor(observations).float()
+            # Ensure observations are on the same device as the preprocessor
+            observations = observations.to(next(self._obs_preprocessor.parameters()).device)
+
+            # Encoded obs = 512, encoded obs + option = 520
+            # Raw obs = 28224, raw obs + option = 28232
+            expected_raw_size = self._obs_preprocessor.expected_obs_size
+            expected_encoded_size = self._obs_preprocessor.output_dim
+            
+            # If observations are already encoded (match encoded size or encoded+option size), skip encoding
+            if self._option_dim > 0:
+                if observations.shape[-1] == expected_encoded_size + self._option_dim:
+                    # Already encoded with option - pass through
+                    return observations
+            elif observations.shape[-1] == expected_encoded_size:
+                # Already encoded without option - pass through
+                return observations
+            
+            if self._option_dim > 0 and observations.shape[-1] > expected_raw_size:
+                # Split observation and option
+                obs_only = observations[..., :-self._option_dim]
+                option = observations[..., -self._option_dim:]
+                
+                # Encode observation through CNN
+                encoded_obs = self._obs_preprocessor(obs_only)
+                
+                # Re-concatenate encoded observation with option
+                observations = torch.cat([encoded_obs, option], dim=-1)
+            else:
+                # No option concatenated, just encode
+                observations = self._obs_preprocessor(observations)
+        
         if self._omit_obs_idxs is not None:
             observations = observations.clone()
             observations[:, self._omit_obs_idxs] = 0
