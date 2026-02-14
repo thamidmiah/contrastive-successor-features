@@ -2,6 +2,10 @@ slurm_output/
 figures/
 wandb/
 logs/
+docs/
+
+# Markdown files
+*.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
