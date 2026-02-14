@@ -235,3 +235,18 @@ class AtariEnv(gym.Wrapper):
         if hasattr(obs, '__array__'):
             obs = np.array(obs)
         return obs, reward, done, info
+    
+    def render(self, mode='rgb_array'):
+        """Render the environment.
+        
+        Args:
+            mode: Rendering mode ('rgb_array' for video recording)
+            
+        Returns:
+            RGB array if mode='rgb_array', None otherwise
+        """
+        return self.env.render()
+    
+    def close(self):
+        """Close the environment."""
+        return self.env.close()
