@@ -169,6 +169,12 @@ class IOD(RLAlgorithm):
                     for key, module in self.param_modules.items():
                         total_norm = compute_total_norm(module.parameters())
                         _record_scalar(f'TotalGradNorm{key.replace("_", " ").title().replace(" ", "")}', total_norm.item())
+                
+                # Log pre-clipping gradient norms to monitor if clipping is constantly engaged
+                if hasattr(self, '_last_grad_norm_before_clip'):
+                    for key, norm in self._last_grad_norm_before_clip.items():
+                        _record_scalar(f'GradNormBeforeClip_{key}', norm)
+                
                 for k, v in extra_scalar_metrics.items():
                     _record_scalar(k, v)
                 _record_scalar('TimeComputingMetrics', time_computing_metrics[0])
@@ -325,9 +331,36 @@ class IOD(RLAlgorithm):
     def _generate_option_extras(self, options):
         return [{'option': option} for option in options]
 
-    def _gradient_descent(self, loss, optimizer_keys):
-        self._optimizer.zero_grad(keys=optimizer_keys)
+    def _gradient_descent(self, loss, optimizer_keys, max_grad_norm=10.0):
+        # CRITICAL: Clear ALL gradients first to prevent accumulation across optimizer steps
+        # This is essential because we may have shared modules (e.g., CNN encoder) that
+        # get gradients from multiple optimizer steps (qf, option_policy, traj_encoder)
+        # but aren't included in every optimizer_keys set.
+        for param in self.all_parameters():
+            param.grad = None
+        
+        # Now compute gradients for this specific loss
         loss.backward()
+        
+        # CRITICAL: Gradient clipping for stability
+        # Clip ALL parameters that have gradients (prevents critic divergence)
+        if max_grad_norm is not None and max_grad_norm > 0:
+            # Collect all parameters that were just updated (have gradients)
+            params_to_clip = [p for p in self.all_parameters() if p.grad is not None]
+            
+            if params_to_clip:
+                # Clip gradients in-place and return the total norm BEFORE clipping
+                total_norm_before = torch.nn.utils.clip_grad_norm_(params_to_clip, max_grad_norm)
+                
+                # Store the pre-clipping norm for diagnostic logging
+                # This will help us monitor if we're constantly clipping (sign that LR is too high)
+                if not hasattr(self, '_last_grad_norm_before_clip'):
+                    self._last_grad_norm_before_clip = {}
+                # Store by optimizer key for tracking
+                key_str = '_'.join(sorted(optimizer_keys)) if isinstance(optimizer_keys, list) else str(optimizer_keys)
+                self._last_grad_norm_before_clip[key_str] = total_norm_before.item()
+        
+        # Step only the optimizers specified (their params now have clipped grads)
         self._optimizer.step(keys=optimizer_keys)
 
     def _get_mini_tensors(self, epoch_data):

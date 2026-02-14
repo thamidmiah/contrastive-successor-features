@@ -485,6 +485,11 @@ class METRA(IOD):
         if self.inner:
             cur_z = self.traj_encoder(obs).mean
             next_z = self.traj_encoder(next_obs).mean
+            
+            # CRITICAL: Always normalize phi representations to prevent norm explosion
+            # This breaks the positive feedback loop: phi grows -> Q grows -> gradients explode -> phi grows more
+            cur_z = cur_z / (cur_z.norm(dim=-1, keepdim=True) + 1e-8)
+            next_z = next_z / (next_z.norm(dim=-1, keepdim=True) + 1e-8)
 
             target_z = next_z - cur_z
 
@@ -507,23 +512,46 @@ class METRA(IOD):
             if self.discrete:
                 masks = (mini_batch['options'] - mini_batch['options'].mean(dim=1, keepdim=True)) * self.dim_option / (self.dim_option - 1 if self.dim_option != 1 else 1)
                 rewards = (target_z * masks).sum(dim=1)
+                
+                # CRITICAL: Scale intrinsic reward to prevent collapse
+                # After normalization, intrinsic rewards become ~1e-5 which is too small
+                # Scale by 100× to make them comparable to typical reward magnitudes
+                intrinsic_scale = 100.0
+                rewards = rewards * intrinsic_scale
             else:
                 inner = (target_z * mini_batch['options']).sum(dim=1)
                 rewards = inner
+                
+                # CRITICAL: Scale intrinsic reward for continuous case too
+                intrinsic_scale = 100.0
+                rewards = rewards * intrinsic_scale
 
-            # For dual objectives
+            # CRITICAL: Store TWO versions of phi representations:
+            # 1. Non-detached for METRA loss (shapes representation via skill discovery)
+            # 2. Detached for Q-functions (prevents critic bootstrapping from collapsing representation)
+            # This is crucial: let METRA train the encoder, but don't let critic interfere
             mini_batch.update({
-                'cur_z': cur_z,
-                'next_z': next_z,
+                'cur_z': cur_z,  # For METRA loss
+                'next_z': next_z,  # For METRA loss
+                'cur_z_detached': cur_z.detach(),  # For Q-functions
+                'next_z_detached': next_z.detach(),  # For Q-functions
             })
 
         elif self.metra_mlp_rep:
             # unneccessary but avoids key errors for now
             cur_z = self.traj_encoder(obs).mean
             next_z = self.traj_encoder(next_obs).mean
+            
+            # CRITICAL: Always normalize phi representations to prevent norm explosion
+            cur_z = cur_z / (cur_z.norm(dim=-1, keepdim=True) + 1e-8)
+            next_z = next_z / (next_z.norm(dim=-1, keepdim=True) + 1e-8)
+            
+            # CRITICAL: Store detached versions for Q-functions (prevent collapse)
             mini_batch.update({
                 'cur_z': cur_z,
                 'next_z': next_z,
+                'cur_z_detached': cur_z.detach(),
+                'next_z_detached': next_z.detach(),
             })
 
             rep = self.f_encoder(obs, next_obs)
@@ -658,8 +686,9 @@ class METRA(IOD):
 
         # Add the log sum exp term to the rewards if using
         if self.add_log_sum_exp_to_rewards:
-            # recompute log sum exp since traj encoder has been updated
-            target_z = mini_batch['next_z'] - mini_batch['cur_z']
+            # CRITICAL: Use DETACHED phi for Q-function computation
+            # This prevents critic from affecting encoder gradients
+            target_z = mini_batch['next_z_detached'] - mini_batch['cur_z_detached']
             if self.sample_new_z:
                 new_z = torch.randn(self.num_negative_z, self.dim_option, device=mini_batch['options'].device)
                 if self.unit_length:
@@ -673,9 +702,10 @@ class METRA(IOD):
 
         # Add the METRA penalty term to the rewards if using
         if self.add_penalty_to_rewards:
+            # CRITICAL: Use DETACHED phi for Q-function computation
             x = mini_batch['obs']
-            phi_x = mini_batch['cur_z']
-            phi_y = mini_batch['next_z']
+            phi_x = mini_batch['cur_z_detached']
+            phi_y = mini_batch['next_z_detached']
             cst_dist = torch.ones_like(x[:, 0])
             cst_penalty = cst_dist - torch.square(phi_y - phi_x).sum(dim=1)
             cst_penalty = torch.clamp(cst_penalty, max=self.dual_slack)

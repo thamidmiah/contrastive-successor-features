@@ -70,6 +70,10 @@ class FrameStackWrapper(gym.Wrapper):
         else:
             obs, reward, done, info = step_result
         
+        # CRITICAL: Clip rewards to [-1, 1] for Atari stability
+        # This is standard practice to prevent Q-value explosion
+        reward = np.sign(reward)
+        
         # Add new frame and remove oldest
         self.frames.append(obs)
         self.frames = self.frames[-self.num_frames:]
@@ -222,6 +226,10 @@ class AtariEnv(gym.Wrapper):
             done = terminated or truncated
         else:
             obs, reward, done, info = step_result
+        
+        # CRITICAL: Clip rewards to [-1, 1] for Atari stability
+        # This is standard practice to prevent Q-value explosion
+        reward = np.sign(reward)
         
         # Convert LazyFrames to numpy array if needed
         if hasattr(obs, '__array__'):
