@@ -128,6 +128,17 @@ class OptionWorker(DefaultWorker):
                 self.agent._force_use_mode_actions = self._deterministic_policy
 
             a, agent_info = self.agent.get_action(agent_input)
+            
+            # Convert one-hot actions to integer for discrete action spaces
+            if hasattr(self.env.action_space, 'n') and isinstance(a, np.ndarray) and a.ndim > 0 and a.size > 1:
+                # This is a discrete action space and action is one-hot encoded
+                action_to_store = np.argmax(a)
+                # Ensure action is within bounds
+                action_to_store = np.clip(action_to_store, 0, self.env.action_space.n - 1)
+            else:
+                action_to_store = a
+                if hasattr(self.env.action_space, 'n') and isinstance(action_to_store, (int, np.integer)):
+                    action_to_store = np.clip(action_to_store, 0, self.env.action_space.n - 1)
 
             if self._render:
                 next_o, r, d, env_info = self.env.step(a, render=self._render)
@@ -139,7 +150,7 @@ class OptionWorker(DefaultWorker):
             else:
                 self._observations.append(self._prev_obs)
             self._rewards.append(r)
-            self._actions.append(a)
+            self._actions.append(action_to_store)
 
             for k, v in agent_info.items():
                 self._agent_infos[k].append(v)
