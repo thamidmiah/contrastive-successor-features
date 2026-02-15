@@ -126,6 +126,10 @@ class METRA(IOD):
             log_alpha=self.log_alpha,
         )
 
+        # Register CNN in param_modules so gradient norms are logged correctly
+        if self._use_cnn_encoder:
+            self.param_modules['cnn'] = self.cnn_encoder
+
         self.tau = tau
 
         self.replay_buffer = replay_buffer

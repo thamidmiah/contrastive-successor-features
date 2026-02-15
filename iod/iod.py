@@ -164,11 +164,15 @@ class IOD(RLAlgorithm):
                     else:
                         _record_scalar(f'{k}', np.array2string(tensors[k].detach().cpu().numpy(), suppress_small=True))
                 with torch.no_grad():
-                    total_norm = compute_total_norm(self.all_parameters())
-                    _record_scalar('TotalGradNormAll', total_norm.item())
-                    for key, module in self.param_modules.items():
-                        total_norm = compute_total_norm(module.parameters())
-                        _record_scalar(f'TotalGradNorm{key.replace("_", " ").title().replace(" ", "")}', total_norm.item())
+                    # Log post-clip gradient norms captured inside _gradient_descent
+                    # (Reading param.grad here would be 0 — grads are zeroed between steps)
+                    if hasattr(self, '_last_grad_norm_after_clip') and self._last_grad_norm_after_clip:
+                        total = sum(self._last_grad_norm_after_clip.values())
+                        _record_scalar('TotalGradNormAll', total)
+                        for key, norm in self._last_grad_norm_after_clip.items():
+                            _record_scalar(f'TotalGradNorm{key.replace("_", " ").title().replace(" ", "")}', norm)
+                    else:
+                        _record_scalar('TotalGradNormAll', 0.0)
                 
                 # Log pre-clipping gradient norms to monitor if clipping is constantly engaged
                 if hasattr(self, '_last_grad_norm_before_clip'):
@@ -359,6 +363,21 @@ class IOD(RLAlgorithm):
                 # Store by optimizer key for tracking
                 key_str = '_'.join(sorted(optimizer_keys)) if isinstance(optimizer_keys, list) else str(optimizer_keys)
                 self._last_grad_norm_before_clip[key_str] = total_norm_before.item()
+
+                # Store per-module post-clip gradient norms (captured NOW, before they're zeroed)
+                if not hasattr(self, '_last_grad_norm_after_clip'):
+                    self._last_grad_norm_after_clip = {}
+                for key in optimizer_keys:
+                    if key in self.param_modules:
+                        norm = compute_total_norm(self.param_modules[key].parameters())
+                        self._last_grad_norm_after_clip[key] = norm.item()
+                    else:
+                        # Handle optimizer keys that map to multiple param_modules
+                        # e.g. 'qf' optimizer covers both 'qf1' and 'qf2' modules
+                        for pm_key, module in self.param_modules.items():
+                            if pm_key.startswith(key):
+                                norm = compute_total_norm(module.parameters())
+                                self._last_grad_norm_after_clip[pm_key] = norm.item()
         
         # Step only the optimizers specified (their params now have clipped grads)
         self._optimizer.step(keys=optimizer_keys)
