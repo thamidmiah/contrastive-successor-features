@@ -504,11 +504,11 @@ class METRA(IOD):
         if self.inner:
             cur_z = self.traj_encoder(obs).mean
             next_z = self.traj_encoder(next_obs).mean
-            
-            # CRITICAL: Always normalize phi representations to prevent norm explosion
-            # This breaks the positive feedback loop: phi grows -> Q grows -> gradients explode -> phi grows more
-            cur_z = cur_z / (cur_z.norm(dim=-1, keepdim=True) + 1e-8)
-            next_z = next_z / (next_z.norm(dim=-1, keepdim=True) + 1e-8)
+
+            # No normalization or clamping here — phi norms are controlled
+            # by a lightweight regularization term in _update_loss_te (weight=0.01).
+            # This allows phi to grow freely during early training while the
+            # dual constraint shapes the representation.
 
             target_z = next_z - cur_z
 
@@ -531,24 +531,17 @@ class METRA(IOD):
             if self.discrete:
                 masks = (mini_batch['options'] - mini_batch['options'].mean(dim=1, keepdim=True)) * self.dim_option / (self.dim_option - 1 if self.dim_option != 1 else 1)
                 rewards = (target_z * masks).sum(dim=1)
-                
-                # CRITICAL: Scale intrinsic reward to prevent collapse
-                # After normalization, intrinsic rewards become ~1e-5 which is too small
-                # Scale by 100× to make them comparable to typical reward magnitudes
-                intrinsic_scale = 100.0
-                rewards = rewards * intrinsic_scale
+                # NO reward scaling — matching original METRA paper.
+                # The dual constraint controls the magnitude of phi_diff,
+                # so rewards are naturally well-scaled.
             else:
                 inner = (target_z * mini_batch['options']).sum(dim=1)
                 rewards = inner
-                
-                # CRITICAL: Scale intrinsic reward for continuous case too
-                intrinsic_scale = 100.0
-                rewards = rewards * intrinsic_scale
+                # NO reward scaling — matching original METRA paper.
 
-            # CRITICAL: Store TWO versions of phi representations:
+            # Store TWO versions of phi representations:
             # 1. Non-detached for METRA loss (shapes representation via skill discovery)
             # 2. Detached for Q-functions (prevents critic bootstrapping from collapsing representation)
-            # This is crucial: let METRA train the encoder, but don't let critic interfere
             mini_batch.update({
                 'cur_z': cur_z,  # For METRA loss
                 'next_z': next_z,  # For METRA loss
@@ -560,12 +553,11 @@ class METRA(IOD):
             # unneccessary but avoids key errors for now
             cur_z = self.traj_encoder(obs).mean
             next_z = self.traj_encoder(next_obs).mean
+
+            # NO unit normalization — matching original METRA paper.
+            # Dual constraint controls phi norms.
             
-            # CRITICAL: Always normalize phi representations to prevent norm explosion
-            cur_z = cur_z / (cur_z.norm(dim=-1, keepdim=True) + 1e-8)
-            next_z = next_z / (next_z.norm(dim=-1, keepdim=True) + 1e-8)
-            
-            # CRITICAL: Store detached versions for Q-functions (prevent collapse)
+            # Store detached versions for Q-functions (prevent collapse)
             mini_batch.update({
                 'cur_z': cur_z,
                 'next_z': next_z,
@@ -661,9 +653,20 @@ class METRA(IOD):
 
         loss_te = -te_obj.mean()
 
+        # Phi norm regularization: lightweight safety net to prevent explosion.
+        # Weight 0.01 is small enough to not interfere with METRA learning
+        # (te_obj ≈ 0.03) but large enough to catch runaway norms (20+).
+        # Previous weight of 0.5 was too aggressive — it pinned ||phi||=1.0
+        # so tightly that phi_diff couldn't grow (same failure as unit norm).
+        phi_norm_x = torch.norm(phi_x, dim=1)
+        phi_norm_y = torch.norm(phi_y, dim=1)
+        phi_norm_reg = ((phi_norm_x - 1.0) ** 2).mean() + ((phi_norm_y - 1.0) ** 2).mean()
+        loss_te = loss_te + 0.01 * phi_norm_reg
+
         train_store.update({
             'TeObjMean': te_obj.mean(),
             'LossTe': loss_te,
+            'PhiNormReg': phi_norm_reg,
         })
 
     def _update_loss_dual_lam(self, train_store: Dict[str, Any], mini_batch: Dict[str, Any]) -> None:

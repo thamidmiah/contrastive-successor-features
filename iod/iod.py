@@ -65,6 +65,25 @@ class IOD(RLAlgorithm):
         self.sample_cpu = sample_cpu
         self.option_policy = option_policy.to(self.device)
         self.traj_encoder = traj_encoder.to(self.device)
+
+        # Scale up traj_encoder's final layer so phi outputs start with
+        # meaningful magnitude (~0.1 instead of ~0.001).
+        # Without this, phi_diff ≈ 1e-6 and the dual constraint has no
+        # gradient signal to learn skill-distinguishing representations.
+        with torch.no_grad():
+            mean_module = getattr(self.traj_encoder, '_mean_module', None)
+            if mean_module is not None:
+                last_linear = None
+                for m in mean_module.modules():
+                    if isinstance(m, torch.nn.Linear):
+                        last_linear = m
+                if last_linear is not None:
+                    last_linear.weight.data *= 10.0
+                    if last_linear.bias is not None:
+                        last_linear.bias.data *= 10.0
+                    print(f"[IOD] Scaled traj_encoder final layer weights x10 "
+                          f"(shape: {last_linear.weight.shape})")
+
         self.dual_lam = dual_lam.to(self.device)
         self.param_modules = {
             'traj_encoder': self.traj_encoder,
