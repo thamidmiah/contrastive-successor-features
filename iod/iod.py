@@ -219,6 +219,15 @@ class IOD(RLAlgorithm):
     def train(self, runner):
         last_return = None
 
+        # If resuming from a checkpoint, override the starting epoch
+        # runner._train_args is set by runner.train() before calling algo.train()
+        resume_epoch = getattr(self, '_resume_start_epoch', None)
+        if resume_epoch is not None:
+            runner._train_args.start_epoch = resume_epoch
+            runner._stats.total_itr = resume_epoch
+            runner._stats.total_epoch = resume_epoch
+            print(f"[IOD] Resuming training from epoch {resume_epoch}")
+
         with global_context.GlobalContext({'phase': 'train', 'policy': 'sampling'}):
             for _ in runner.step_epochs(
                     full_tb_epochs=0,

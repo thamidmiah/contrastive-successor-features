@@ -10,7 +10,9 @@ import dowel
 import argparse
 import datetime
 import functools
+import glob
 import os
+import pickle
 import platform
 import torch.multiprocessing as mp
 
@@ -292,6 +294,16 @@ def get_argparser():
     parser.add_argument('--common_lr', type=float, default=1e-4, help="Default learning rate for all neural networks.")
     parser.add_argument('--lr_op', type=float, default=None, help="Potential overwrite for the learning rate for the policy parameters.")
     parser.add_argument('--lr_te', type=float, default=None, help="Potential overwrite for the learning rate for the trajectory encoder parameters.")
+
+    # Resume from checkpoint
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help="Path to snapshot directory to resume from (e.g. exp/MyRun/sd000_.../). "
+                             "Loads network weights, optimizer states, and replay buffer from the checkpoint. "
+                             "New hyperparams (dual_slack, alpha_min, etc.) come from the CLI, not the checkpoint.")
+    parser.add_argument('--resume_epoch', type=int, default=None,
+                        help="Epoch to resume from. If None, loads the latest available checkpoint. "
+                             "Training runs from resume_epoch to n_epochs (so set n_epochs to "
+                             "resume_epoch + desired_additional_epochs).")
 
     # General algorithmic parameters
     parser.add_argument('--dim_option', type=int, default=2, help="Specifies the skill dimension.")
@@ -1074,6 +1086,118 @@ def run(ctxt=None):
         n_workers=args.n_parallel,
     )
     algo.option_policy.to(device)
+
+    # ── Resume from checkpoint ──────────────────────────────────────────
+    if args.resume_from is not None:
+        snapshot_dir = args.resume_from
+
+        # Find the checkpoint file
+        if args.resume_epoch is not None:
+            pkl_path = os.path.join(snapshot_dir, f'itr_{args.resume_epoch}.pkl')
+            if not os.path.exists(pkl_path):
+                raise FileNotFoundError(f"Checkpoint not found: {pkl_path}")
+            resume_epoch = args.resume_epoch
+        else:
+            # Find latest checkpoint
+            pkl_files = glob.glob(os.path.join(snapshot_dir, 'itr_*.pkl'))
+            # Exclude params.pkl, sort numerically
+            pkl_files = [f for f in pkl_files if os.path.basename(f).startswith('itr_')]
+            pkl_files.sort(key=lambda f: int(os.path.basename(f).replace('itr_', '').replace('.pkl', '')))
+            if not pkl_files:
+                raise FileNotFoundError(f"No itr_*.pkl checkpoints found in {snapshot_dir}")
+            pkl_path = pkl_files[-1]
+            resume_epoch = int(os.path.basename(pkl_path).replace('itr_', '').replace('.pkl', ''))
+
+        print(f"\n{'='*60}")
+        print(f"RESUMING FROM CHECKPOINT")
+        print(f"  Snapshot dir : {snapshot_dir}")
+        print(f"  Checkpoint   : {os.path.basename(pkl_path)}")
+        print(f"  Resume epoch : {resume_epoch}")
+        print(f"{'='*60}")
+
+        # Load checkpoint
+        with open(pkl_path, 'rb') as f:
+            checkpoint = pickle.load(f)
+
+        old_algo = checkpoint['algo']
+
+        # ── Copy neural network weights ──
+        modules_to_copy = [
+            ('option_policy', 'option_policy'),
+            ('traj_encoder', 'traj_encoder'),
+            ('target_te', 'target_te'),
+            ('qf1', 'qf1'),
+            ('qf2', 'qf2'),
+            ('target_qf1', 'target_qf1'),
+            ('target_qf2', 'target_qf2'),
+            ('log_alpha', 'log_alpha'),
+            ('dual_lam', 'dual_lam'),
+        ]
+        for attr_name, label in modules_to_copy:
+            old_mod = getattr(old_algo, attr_name, None)
+            new_mod = getattr(algo, attr_name, None)
+            if old_mod is not None and new_mod is not None:
+                try:
+                    new_mod.load_state_dict(old_mod.state_dict())
+                    print(f"  ✓ Restored {label}")
+                except Exception as e:
+                    print(f"  ✗ Failed to restore {label}: {e}")
+
+        # ── Copy CNN encoder weights (if shared) ──
+        if hasattr(old_algo, 'cnn_encoder') and hasattr(algo, 'cnn_encoder'):
+            try:
+                algo.cnn_encoder.load_state_dict(old_algo.cnn_encoder.state_dict())
+                print(f"  ✓ Restored cnn_encoder")
+            except Exception as e:
+                print(f"  ✗ Failed to restore cnn_encoder: {e}")
+
+        # ── Copy optimizer states ──
+        if hasattr(old_algo, '_optimizer') and hasattr(algo, '_optimizer'):
+            old_optims = old_algo._optimizer._optimizers
+            new_optims = algo._optimizer._optimizers
+            for key in new_optims:
+                if key in old_optims:
+                    try:
+                        new_optims[key].load_state_dict(old_optims[key].state_dict())
+                        print(f"  ✓ Restored optimizer[{key}]")
+                    except Exception as e:
+                        print(f"  ✗ Failed to restore optimizer[{key}]: {e}")
+
+        # ── Seed replay buffer with checkpoint samples ──
+        # The full replay buffer is NOT saved in pkl (too large).
+        # Only a 10K sample is saved under 'replay_buffer_samples'.
+        # We seed the new buffer with these samples so training doesn't
+        # start completely cold.
+        replay_samples = checkpoint.get('replay_buffer_samples', None)
+        if replay_samples is not None and hasattr(algo, 'replay_buffer') and algo.replay_buffer is not None:
+            try:
+                # Add all samples as a single "path" into the buffer
+                algo.replay_buffer.add_path(replay_samples)
+                n_samples = len(replay_samples['actions'])
+                print(f"  ✓ Seeded replay buffer with {n_samples} samples from checkpoint")
+            except Exception as e:
+                print(f"  ⚠ Could not seed replay buffer: {e}")
+                print(f"    Buffer will refill naturally during training")
+        else:
+            print(f"  ⚠ No replay buffer samples in checkpoint — buffer starts empty")
+
+        # ── Set resume epoch on the algo so iod.train() can use it ──
+        algo._resume_start_epoch = resume_epoch
+
+        # Free checkpoint memory
+        del checkpoint, old_algo
+
+        print(f"\n  New hyperparams from CLI will be used:")
+        print(f"    dual_slack   = {algo.dual_slack}")
+        print(f"    alpha_min    = {getattr(algo, '_alpha_min', None)}")
+        if hasattr(algo, 'dual_lam'):
+            lam_val = algo.dual_lam.param.data.item() if hasattr(algo.dual_lam, 'param') else '?'
+            print(f"    dual_lam val = {lam_val:.4f}  (restored from checkpoint)")
+        if hasattr(algo, 'log_alpha'):
+            alpha_val = algo.log_alpha.param.data.exp().item() if hasattr(algo.log_alpha, 'param') else '?'
+            print(f"    alpha val    = {alpha_val:.6f}  (restored from checkpoint)")
+        print(f"    Training will continue from epoch {resume_epoch}")
+        print(f"{'='*60}\n")
 
     # Start training
     runner.train(n_epochs=args.n_epochs, batch_size=args.traj_batch_size)

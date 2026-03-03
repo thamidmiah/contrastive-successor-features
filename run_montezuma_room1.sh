@@ -1,15 +1,19 @@
 #!/bin/bash
 # Montezuma's Revenge Room 1 - METRA skill discovery
-# Improved hyperparameters for visually distinct skills:
-#   - dim_option=4 (fewer skills → more distinct)
-#   - alpha_min=0.01 (prevent alpha collapse → maintain exploration)
-#   - num_random_trajectories=100 (better baseline for phi normalization)
-#   - sac_max_buffer_size=50000 (larger buffer for diverse experience)
-#   - sac_target_coef=1.0 (default; don't suppress target entropy)
-#   - No-op reset randomization (built into MontezumaRoom1Wrapper, noop_max=30)
+# RESUME from epoch 200 checkpoint with improved v3 hyperparameters:
+#   - dual_slack: 0.01 → 1.0  (MOST CRITICAL: force real phi separation)
+#   - alpha_min: 0.01 → 0.03  (higher exploration floor)
+#   - sac_target_coef: 0.5    (higher entropy target)
+#   - dual_lam: 24 initial    (strong Lagrange pressure; restored value from checkpoint ~2.68)
+#   - sac_max_buffer_size: 30000 (prevent OOM on 8GB Mac)
+#   - n_epochs: 10000 (training continues from epoch 200 → 10000)
+
+#RESUME_DIR="exp/Montezuma-Increased-Trajectories/sd000_1772467785_montezuma_room1_metra"
+#     --resume_from "$RESUME_DIR" \
+#   --resume_epoch 200 \
 
 python run/train.py \
-    --run_group "Montezuma-Increased-Trajectories" \
+    --run_group "Montezuma-Hex" \
     --env "montezuma_room1" \
     --algo "metra" \
     --max_path_length 500 \
@@ -40,7 +44,7 @@ python run/train.py \
     --common_lr 1e-4 \
     --dual_reg 1 \
     --dual_lam 24 \
-    --dual_slack 1e-2 \
+    --dual_slack 1.0 \
     --turn_off_dones 0 \
     --n_parallel 1 \
     --eval_plot_axis -1 \
