@@ -33,8 +33,7 @@ dependencies:
       - gitpython==3.1.46
       - google-pasta==0.2.0
       - grpcio==1.78.0
-      - gym==0.26.2
-      - gym-notices==0.1.0
+      - gym==0.15.4
       - gymnasium==1.1.1
       - h5py==3.14.0
       - idna==3.11
