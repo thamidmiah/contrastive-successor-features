@@ -124,6 +124,11 @@ class MetraSf(METRA):
             optimizer_keys=['log_alpha'],
         )
 
+        # Enforce alpha floor: prevent alpha from collapsing to near-zero
+        if self._log_alpha_min is not None:
+            with torch.no_grad():
+                self.log_alpha.param.data.clamp_(min=self._log_alpha_min)
+
     def _update_loss_sf_td(self, train_store: Dict, mini_batch: Dict) -> None:
         """Computes the successor feature loss.
 

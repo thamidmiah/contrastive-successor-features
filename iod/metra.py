@@ -29,6 +29,7 @@ class METRA(IOD):
             tau: float,
             scale_reward: float,
             target_coef: float,
+            alpha_min: float = None,
             replay_buffer: PathBufferEx,
             min_buffer_size: int,
             inner: bool,
@@ -142,6 +143,12 @@ class METRA(IOD):
 
         self.use_discrete_sac = use_discrete_sac    
         self._reward_scale_factor = scale_reward
+        self._alpha_min = alpha_min
+        if self._alpha_min is not None:
+            self._log_alpha_min = np.log(self._alpha_min)
+            print(f"[METRA] Alpha floor enabled: alpha >= {self._alpha_min} (log_alpha >= {self._log_alpha_min:.4f})")
+        else:
+            self._log_alpha_min = None
         if self.use_discrete_sac:
             self._target_entropy = np.log(self._env_spec.action_space.n) * target_coef
         else:
@@ -483,6 +490,11 @@ class METRA(IOD):
             train_store['LossAlpha'],
             optimizer_keys=['log_alpha'],
         )
+
+        # Enforce alpha floor: prevent alpha from collapsing to near-zero
+        if self._log_alpha_min is not None:
+            with torch.no_grad():
+                self.log_alpha.param.data.clamp_(min=self._log_alpha_min)
 
         # Update target networks
         sac_utils.update_targets(self)

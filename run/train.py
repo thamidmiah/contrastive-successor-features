@@ -149,8 +149,19 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         )
         cp_num_truncate_obs = 2
     
+    elif args.env == 'montezuma_room1':
+        # Montezuma's Revenge constrained to Room 1 for skill discovery
+        from envs.atari.atari_env import AtariEnv
+        from envs.atari.montezuma_room1_wrapper import MontezumaRoom1Wrapper
+        frame_stack = args.frame_stack if args.frame_stack is not None else 4
+        base_env = AtariEnv(game='MontezumaRevenge', frame_stack=frame_stack, normalize_pixels=True)
+        env = MontezumaRoom1Wrapper(base_env)
+        normalizer_type = 'off'  # No normalization for pixel observations
+        # Atari envs have discrete action spaces — force discrete SAC
+        args.use_discrete_sac = 1
+
     elif args.env.startswith('atari_'):
-        # NEW: Atari environment support
+        # Atari environment support
         from envs.atari.atari_env import AtariEnv
         game_name = args.env.replace('atari_', '').replace('_', ' ').title().replace(' ', '')
         
@@ -161,12 +172,16 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         frame_stack = args.frame_stack if args.frame_stack is not None else 4
         env = AtariEnv(game=game_name, frame_stack=frame_stack, normalize_pixels=True)
         normalizer_type = 'off'  # No normalization for pixel observations
+        # Atari envs have discrete action spaces — force discrete SAC
+        args.use_discrete_sac = 1
     
     else:
         raise NotImplementedError
 
-    # Only apply external frame stacking for non-Atari environments  
-    if args.frame_stack is not None and not args.env.startswith('atari_'):
+    # Only apply external frame stacking for non-Atari environments
+    # (Atari/Montezuma handle frame stacking internally in AtariEnv)
+    is_atari_env = args.env.startswith('atari_') or args.env == 'montezuma_room1'
+    if args.frame_stack is not None and not is_atari_env:
         from envs.custom_dmc_tasks.pixel_wrappers import FrameStackWrapper
         env = FrameStackWrapper(env, args.frame_stack)
 
@@ -174,8 +189,8 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
     normalizer_type = args.normalizer_type
     normalizer_kwargs = {}
     
-    # Don't flatten observations for Atari (keep 3D structure for CNN)
-    if args.env.startswith('atari_'):
+    # Don't flatten observations for Atari / Montezuma (keep 3D structure for CNN)
+    if args.env.startswith('atari_') or args.env == 'montezuma_room1':
         normalizer_kwargs['flatten_obs'] = False
 
     if normalizer_type == 'off':
@@ -260,7 +275,8 @@ def get_argparser():
         # Hierarchical control environments
         'ant_nav_prime', 'half_cheetah_hurdle', 'half_cheetah_goal', 'dmc_quadruped_goal', 'dmc_humanoid_goal',
         # Atari environments
-        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge', 'atari_mspacman'
+        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge', 'atari_mspacman',
+        'montezuma_room1',
     ])
 
     # Training
@@ -281,6 +297,7 @@ def get_argparser():
     parser.add_argument('--dim_option', type=int, default=2, help="Specifies the skill dimension.")
     parser.add_argument('--discrete', type=int, default=0, choices=[0, 1], help="Specifies whether to use discrete or continuous skills.")
     parser.add_argument('--alpha', type=float, default=0.01, help="Specifies the entropy coefficient (initial value if adaptive).")
+    parser.add_argument('--alpha_min', type=float, default=None, help="Minimum alpha (entropy coefficient) floor. Prevents alpha from collapsing to near-zero, which kills exploration. Recommended: 0.01 for Atari.")
     parser.add_argument('--algo', type=str, default='metra', choices=[
         # CSF (our method) & skill discovery baseliens
         'metra', 'metra_sf', 'dads', 'cic',
@@ -404,7 +421,17 @@ def run(ctxt=None):
         pixel_shape = None
 
     # Setup device
-    device = torch.device('cuda' if args.use_gpu else 'cpu')
+    if args.use_gpu:
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device('mps')
+        else:
+            print("[WARNING] GPU requested but neither CUDA nor MPS available. Falling back to CPU.")
+            device = torch.device('cpu')
+    else:
+        device = torch.device('cpu')
+    print(f"[Setup] Using device: {device}")
 
     # Hidden sizes for all following networks
     master_dims = [args.model_master_dim] * args.model_master_num_layers
@@ -855,6 +882,7 @@ def run(ctxt=None):
         tau=args.sac_tau,
         scale_reward=args.sac_scale_reward,
         target_coef=args.sac_target_coef,
+        alpha_min=args.alpha_min,
 
         replay_buffer=replay_buffer,
         min_buffer_size=args.sac_min_buffer_size,

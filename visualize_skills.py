@@ -28,6 +28,7 @@ import os
 import imageio
 
 from envs.atari.atari_env import AtariEnv
+from envs.atari.montezuma_room1_wrapper import MontezumaRoom1Wrapper
 
 
 def load_checkpoint(exp_dir, epoch=None):
@@ -54,16 +55,31 @@ def load_checkpoint(exp_dir, epoch=None):
     return data, epoch
 
 
-def setup_env():
-    """Create Ms. Pac-Man environment matching training config."""
-    env = AtariEnv(
-        game='MsPacman',
-        frame_stack=4,
-        screen_size=84,
-        grayscale=True,
-        normalize_pixels=True,
-    )
-    print("Created Ms. Pac-Man environment")
+def setup_env(env_name='mspacman'):
+    """Create Atari environment matching training config.
+    
+    Args:
+        env_name: 'mspacman' or 'montezuma_room1'
+    """
+    if env_name == 'montezuma_room1':
+        base_env = AtariEnv(
+            game='MontezumaRevenge',
+            frame_stack=4,
+            screen_size=84,
+            grayscale=True,
+            normalize_pixels=True,
+        )
+        env = MontezumaRoom1Wrapper(base_env)
+        print("Created Montezuma's Revenge Room 1 environment")
+    else:
+        env = AtariEnv(
+            game='MsPacman',
+            frame_stack=4,
+            screen_size=84,
+            grayscale=True,
+            normalize_pixels=True,
+        )
+        print("Created Ms. Pac-Man environment")
     return env
 
 
@@ -98,7 +114,7 @@ def introspect_algo(algo):
 
 
 def collect_skill_trajectories(algo, env, num_episodes_per_skill=3, max_steps=500,
-                               record_video=True, output_dir=None):
+                               record_video=True, output_dir=None, env_name='mspacman'):
     """Collect trajectories for each skill and optionally record videos.
     
     Key fixes (matching training pipeline exactly):
@@ -114,6 +130,9 @@ def collect_skill_trajectories(algo, env, num_episodes_per_skill=3, max_steps=50
     cnn_encoder = algo.cnn_encoder if hasattr(algo, 'cnn_encoder') else None
     num_skills = algo.dim_option
     device = torch.device('cpu')
+    
+    # Check if using discrete SAC (categorical policy)
+    use_discrete_sac = getattr(algo, 'use_discrete_sac', False)
     
     # Force deterministic actions for reproducible visualisation
     old_force_mode = policy._force_use_mode_actions
@@ -145,6 +164,7 @@ def collect_skill_trajectories(algo, env, num_episodes_per_skill=3, max_steps=50
             episode_obs = []
             episode_phis = []
             episode_rewards = []
+            episode_positions = []  # For Montezuma heatmaps
             frames = []
             
             for step in range(max_steps):
@@ -191,6 +211,10 @@ def collect_skill_trajectories(algo, env, num_episodes_per_skill=3, max_steps=50
                 episode_phis.append(phi_np.copy())
                 episode_rewards.append(reward)
                 
+                # Track player position for Montezuma heatmaps
+                if 'player_x' in info:
+                    episode_positions.append([info['player_x'], info['player_y']])
+                
                 obs = next_obs
                 obs_flat = obs.flatten().astype(np.float32)
                 
@@ -206,6 +230,7 @@ def collect_skill_trajectories(algo, env, num_episodes_per_skill=3, max_steps=50
                 'rewards': episode_rewards,
                 'total_reward': total_reward,
                 'length': len(episode_rewards),
+                'positions': np.array(episode_positions) if episode_positions else None,
             })
             skill_phis.append(np.array(episode_phis))
             
@@ -399,6 +424,85 @@ def visualize_phi_evolution(all_phis, num_skills, output_dir):
     plt.close()
 
 
+def visualize_montezuma_heatmaps(all_trajectories, num_skills, output_dir):
+    """Plot 2D position heatmaps for each skill (Montezuma Room 1 only).
+    
+    Uses player_x, player_y from the MontezumaRoom1Wrapper info dict.
+    """
+    # Check if we have position data
+    has_positions = False
+    for skill_idx in range(num_skills):
+        for traj in all_trajectories[skill_idx]:
+            if traj.get('positions') is not None and len(traj['positions']) > 0:
+                has_positions = True
+                break
+        if has_positions:
+            break
+    
+    if not has_positions:
+        print("  [skip] No position data — heatmaps only available for Montezuma")
+        return
+    
+    print("\nVisualizing Montezuma skill heatmaps...")
+    
+    HEATMAP_BINS = 32
+    
+    cols = min(num_skills, 4)
+    rows = (num_skills + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3.5 * rows), squeeze=False)
+    fig.suptitle('Skill Heatmaps — Montezuma Room 1\n(brighter = more visits)',
+                 fontsize=14, fontweight='bold')
+    
+    cmap_fn = cm.get_cmap('tab10')
+    
+    for skill_idx in range(num_skills):
+        r, c = divmod(skill_idx, cols)
+        ax = axes[r][c]
+        
+        # Gather all positions for this skill
+        all_pos = []
+        for traj in all_trajectories[skill_idx]:
+            if traj.get('positions') is not None and len(traj['positions']) > 0:
+                all_pos.append(traj['positions'])
+        
+        if not all_pos:
+            ax.set_title(f'Skill {skill_idx} (no data)', fontsize=10)
+            ax.set_visible(False)
+            continue
+        
+        all_pos = np.concatenate(all_pos, axis=0)
+        
+        heatmap, xedges, yedges = np.histogram2d(
+            all_pos[:, 0], all_pos[:, 1],
+            bins=HEATMAP_BINS,
+            range=[[0, 160], [0, 255]]
+        )
+        heatmap = np.log1p(heatmap)
+        
+        im = ax.imshow(heatmap.T, origin='lower', aspect='auto',
+                       extent=[0, 160, 0, 255],
+                       cmap='hot', interpolation='nearest')
+        
+        avg_steps = np.mean([t['length'] for t in all_trajectories[skill_idx]])
+        color = cmap_fn(skill_idx)
+        ax.set_title(f'Skill {skill_idx}  (avg {avg_steps:.0f} steps)',
+                     fontsize=10, color=color)
+        ax.set_xlabel('Player X')
+        ax.set_ylabel('Player Y')
+        plt.colorbar(im, ax=ax, shrink=0.8)
+    
+    # Hide unused axes
+    for idx in range(num_skills, rows * cols):
+        r, c = divmod(idx, cols)
+        axes[r][c].set_visible(False)
+    
+    plt.tight_layout()
+    output_path = output_dir / 'montezuma_skill_heatmaps.png'
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"  Saved: {output_path}")
+    plt.close()
+
+
 def main():
     import argparse
     
@@ -407,6 +511,9 @@ def main():
     parser.add_argument('--exp_dir', type=str, 
                         default="exp/Ultimate-run/sd100_1771180736_atari_mspacman_metra",
                         help='Path to experiment directory')
+    parser.add_argument('--env', type=str, default='mspacman',
+                        choices=['mspacman', 'montezuma_room1'],
+                        help='Environment (mspacman or montezuma_room1)')
     parser.add_argument('--checkpoint_epoch', type=int, default=None, 
                         help='Epoch to load (default: latest)')
     parser.add_argument('--num_episodes', type=int, default=3,
@@ -440,6 +547,7 @@ def main():
     print("="*60)
     print("METRA Skill Visualization (fixed)")
     print("="*60)
+    print(f"Environment : {args.env}")
     print(f"Experiment  : {args.exp_dir}")
     print(f"Checkpoint  : epoch {epoch}")
     print(f"Skills      : {num_skills}  (from algo.dim_option)")
@@ -461,7 +569,7 @@ def main():
     introspect_algo(algo)
     
     # Setup environment
-    env = setup_env()
+    env = setup_env(args.env)
     
     # Collect trajectories
     all_trajectories, all_phis, all_rewards = collect_skill_trajectories(
@@ -470,6 +578,7 @@ def main():
         max_steps=args.max_steps,
         record_video=args.record_videos,
         output_dir=video_dir,
+        env_name=args.env,
     )
     
     # Generate visualizations
@@ -482,6 +591,10 @@ def main():
     visualize_skill_rewards(all_rewards, output_dir)
     visualize_phi_evolution(all_phis, num_skills, output_dir)
     
+    # Montezuma-specific: position heatmaps
+    if args.env == 'montezuma_room1':
+        visualize_montezuma_heatmaps(all_trajectories, num_skills, output_dir)
+    
     print("\n" + "="*60)
     print("Visualisation complete!")
     print(f"Outputs saved to: {output_dir}")
@@ -493,6 +606,8 @@ def main():
     print("  - phi_dimensions.png    : Per-dimension phi distribution by skill")
     print("  - skill_rewards.png     : Average reward per skill")
     print("  - phi_evolution.png     : ||phi|| norm over episode timesteps")
+    if args.env == 'montezuma_room1':
+        print("  - montezuma_skill_heatmaps.png : Position heatmaps per skill")
     if args.record_videos:
         print(f"  - {num_skills} video files  : Gameplay of each skill")
 
