@@ -44,7 +44,6 @@ libclang==18.1.1
 Markdown==3.9
 markdown-it-py==3.0.0
 MarkupSafe==3.0.3
-matplotlib==3.9.4
 mdurl==0.1.2
 moviepy==2.2.1
 mpmath==1.3.0
@@ -55,7 +54,6 @@ opt_einsum==3.4.0
 optree==0.18.0
 packaging==26.0
 patchelf==0.17.2.4
-pillow==11.3.0
 platformdirs==4.4.0
 proglog==0.1.12
 protobuf==4.25.8
@@ -70,7 +68,6 @@ pytz==2025.2
 PyYAML==6.0.3
 requests==2.32.5
 rich==14.3.2
-scikit-image==0.24.0
 sentry-sdk==2.52.0
 setproctitle==1.3.7
 six==1.17.0
