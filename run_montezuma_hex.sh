@@ -30,7 +30,7 @@ python run/train.py \
   --common_lr 1e-4 \
   --dual_reg 1 \
   --dual_lam 24 \
-  --dual_slack 3e-3 \
+  --dual_slack 1e-3 \
   --turn_off_dones 0 \
   --n_parallel 8 \
   --eval_plot_axis -1 \
