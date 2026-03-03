@@ -1,6 +1,15 @@
 name: csf
 channels:
+  - conda-forge
   - defaults
 dependencies:
   - python=3.9
-prefix: /opt/anaconda3/envs/csf
+  - pip
+  # compiled deps (prebuilt binaries)
+  - numpy=1.26.4
+  - scipy=1.13.1
+  - pandas=2.3.3
+  - h5py=3.14.0
+  - pillow
+  - matplotlib
+  - ml-dtypes=0.3.2
