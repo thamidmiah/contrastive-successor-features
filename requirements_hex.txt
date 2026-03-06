@@ -7,7 +7,7 @@
 # ── Core Deep Learning ──
 # PyTorch with CUDA — installed separately via:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
+numpy==1.26.4
 # ── RL Framework ──
 # garage is installed via: pip install -e garaged/
 # iod is installed via:    pip install -e .
@@ -17,7 +17,7 @@ gymnasium==1.1.1
 
 # ── Atari Environment Support ──
 ale-py==0.11.2
-opencv-python-headless==4.13.0.92
+opencv-python-headless==4.9.0.80
 
 # ── Image Processing & Video ──
 pillow==11.3.0
