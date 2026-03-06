@@ -40,7 +40,6 @@ cma==4.4.2
 
 # ── TensorFlow (Linux, NOT tensorflow-macos) ──
 tensorflow==2.16.2
-tensorflow-probability==0.8.0
 
 # ── Utilities ──
 click==8.1.8
