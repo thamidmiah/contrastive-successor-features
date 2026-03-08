@@ -16,7 +16,6 @@ python run/train.py \
     --run_group "Montezuma-Hex" \
     --env "montezuma_room1" \
     --algo "metra" \
-    --disable_tensorboard 1 \
     --max_path_length 500 \
     --dim_option 4 \
     --discrete 1 \
