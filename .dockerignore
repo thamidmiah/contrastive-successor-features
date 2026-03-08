@@ -1,0 +1,54 @@
+# ============================================================
+# .dockerignore - Exclude unnecessary files from Docker build
+# ============================================================
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Experiment outputs (don't bake results into the image)
+exp/
+*.log
+*.patch
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environments (we create our own in the container)
+.venv/
+venv/
+env/
+
+# Docker files (avoid recursive copies)
+Dockerfile
+docker-compose.yml
+
+# Documentation (not needed at runtime)
+docs/
+
+# Tests (optional: include if you want to run tests in container)
+# tests/
+
+# Garaged extras not needed
+garaged/docker/
+garaged/benchmarks/
+garaged/docs/
+garaged/tests/
+
+# Large files
+*.tar.gz
+*.zip
+*.ckpt
