@@ -509,13 +509,13 @@ class METRA(IOD):
         obs = mini_batch['obs']
         next_obs = mini_batch['next_obs']
         
-        # Encode observations — NOT detached: METRA loss trains the CNN
-        obs = self._encode_obs(obs, detach=False)
-        next_obs = self._encode_obs(next_obs, detach=False)
+        # Encode observations through CNN — NOT detached: METRA loss trains the CNN
+        obs_enc = self._encode_obs(obs, detach=False)
+        next_obs_enc = self._encode_obs(next_obs, detach=False)
 
         if self.inner:
-            cur_z = self.traj_encoder(obs).mean
-            next_z = self.traj_encoder(next_obs).mean
+            cur_z = self.traj_encoder(obs_enc).mean
+            next_z = self.traj_encoder(next_obs_enc).mean
 
             # No normalization or clamping here — phi norms are controlled
             # by a lightweight regularization term in _update_loss_te (weight=0.01).
@@ -563,8 +563,8 @@ class METRA(IOD):
 
         elif self.metra_mlp_rep:
             # unneccessary but avoids key errors for now
-            cur_z = self.traj_encoder(obs).mean
-            next_z = self.traj_encoder(next_obs).mean
+            cur_z = self.traj_encoder(obs_enc).mean
+            next_z = self.traj_encoder(next_obs_enc).mean
 
             # NO unit normalization — matching original METRA paper.
             # Dual constraint controls phi norms.
@@ -577,7 +577,7 @@ class METRA(IOD):
                 'next_z_detached': next_z.detach(),
             })
 
-            rep = self.f_encoder(obs, next_obs)
+            rep = self.f_encoder(obs_enc, next_obs_enc)
             rewards = (rep * mini_batch['options']).sum(dim=1)
 
             if self.log_sum_exp:
@@ -591,7 +591,7 @@ class METRA(IOD):
                 log_sum_exp = torch.logsumexp(pairwise_scores, dim=-1)
 
         else:
-            target_dists = self.traj_encoder(next_obs)
+            target_dists = self.traj_encoder(next_obs_enc)
 
             if self.discrete:
                 logits = target_dists.mean
@@ -670,10 +670,14 @@ class METRA(IOD):
         # (te_obj ≈ 0.03) but large enough to catch runaway norms (20+).
         # Previous weight of 0.5 was too aggressive — it pinned ||phi||=1.0
         # so tightly that phi_diff couldn't grow (same failure as unit norm).
-        phi_norm_x = torch.norm(phi_x, dim=1)
-        phi_norm_y = torch.norm(phi_y, dim=1)
-        phi_norm_reg = ((phi_norm_x - 1.0) ** 2).mean() + ((phi_norm_y - 1.0) ** 2).mean()
-        loss_te = loss_te + 0.01 * phi_norm_reg
+        # Only apply when dual_reg is enabled (phi_x/phi_y are defined)
+        if self.dual_reg:
+            phi_norm_x = torch.norm(phi_x, dim=1)
+            phi_norm_y = torch.norm(phi_y, dim=1)
+            phi_norm_reg = ((phi_norm_x - 1.0) ** 2).mean() + ((phi_norm_y - 1.0) ** 2).mean()
+            loss_te = loss_te + 0.01 * phi_norm_reg
+        else:
+            phi_norm_reg = torch.tensor(0.0, device=te_obj.device)
 
         train_store.update({
             'TeObjMean': te_obj.mean(),

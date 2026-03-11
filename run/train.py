@@ -577,7 +577,14 @@ def run(ctxt=None):
             te_encoder = make_encoder(spectral_normalization=True)
         else:
             te_encoder = None
-        traj_encoder = with_encoder(traj_encoder, encoder=te_encoder)    
+        traj_encoder = with_encoder(traj_encoder, encoder=te_encoder)
+
+    # Assign shared CNN encoder to traj_encoder's preprocessor (if using CNN)
+    # NOTE: We do NOT wrap traj_encoder in CNNWrapper.  Instead, _encode_obs()
+    # is called before every traj_encoder() call (in _update_rewards, _evaluate_policy, etc.)
+    # This avoids double-encoding and keeps _encode_obs as the single source of truth.
+    if shared_cnn_encoder is not None:
+        print(f"[Setup] traj_encoder is a plain MLP (512 → {output_dim}); CNN encoding handled by _encode_obs()")    
 
 
     # ********************
@@ -760,18 +767,11 @@ def run(ctxt=None):
                 {'params': log_alpha.parameters(), 'lr': _finalize_lr(args.sac_lr_a)},
             ])
         })
-    
-    # Add CNN optimizer if using CNN encoder
-    if shared_cnn_encoder is not None:
-        optimizers.update({
-            'cnn': torch.optim.Adam([
-                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
-            ])
-        })
-        print(f"[Setup] Added CNN optimizer with learning rate {_finalize_lr(args.sac_lr_q)}")
-    
-    # NOTE: for metra_sf, the q networks are really just the "psi" successor features that 
+
+    # NOTE: for metra_sf, the q networks are really just the "psi" successor features that
     # are learned in the same way as the q functions in the other algorithms
+    # For metra_sf, we always use ContinuousMLPQFunctionEx even for discrete actions
+    # because the SF network outputs a feature vector (dim_option), not action-values
     elif args.algo == 'metra_sf':
         qf1 = ContinuousMLPQFunctionEx(
             obs_dim=policy_q_input_dim,
@@ -802,15 +802,6 @@ def run(ctxt=None):
                 {'params': log_alpha.parameters(), 'lr': _finalize_lr(args.sac_lr_a)},
             ])
         })
-    
-    # Add CNN optimizer if using CNN encoder (for metra_sf case)
-    if shared_cnn_encoder is not None and args.algo == 'metra_sf':
-        optimizers.update({
-            'cnn': torch.optim.Adam([
-                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
-            ])
-        })
-        print(f"[Setup] Added CNN optimizer (metra_sf) with learning rate {_finalize_lr(args.sac_lr_q)}")
 
     elif args.algo == 'ppo':
         # TODO: Currently not support pixel obs
@@ -826,6 +817,15 @@ def run(ctxt=None):
                 {'params': vf.parameters(), 'lr': _finalize_lr(args.lr_op)},
             ]),
         })
+
+    # Add CNN optimizer if using CNN encoder (must come after all algorithm-specific Q network setup)
+    if shared_cnn_encoder is not None:
+        optimizers.update({
+            'cnn': torch.optim.Adam([
+                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
+            ])
+        })
+        print(f"[Setup] Added CNN optimizer with learning rate {_finalize_lr(args.sac_lr_q)}")
 
     # This is for the parametrization ablation, where we use the encoding f(s, s')^T z
     f_encoder = None
@@ -977,6 +977,17 @@ def run(ctxt=None):
             dual_slack=args.dual_slack,
             dual_dist=args.dual_dist,
         )
+        
+        # Add CNN parameters if using CNN encoder (same as METRA branch)
+        if args.use_cnn_encoder:
+            algo_kwargs.update(
+                use_cnn_encoder=True,
+                cnn_type=args.cnn_type,
+                alpha_intrinsic=args.alpha_intrinsic,
+                cnn_learning_rate=args.common_lr,
+                cnn_encoder=shared_cnn_encoder,
+            )
+        
         algo = MetraSf(
             **algo_kwargs,
             **skill_common_args,

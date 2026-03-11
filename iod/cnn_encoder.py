@@ -228,5 +228,51 @@ def test_cnn_encoder():
     print("="*60)
 
 
+class CNNWrapper(nn.Module):
+    """
+    Wrapper to handle pixel observation reshaping for CNN encoders.
+
+    This wrapper takes flattened pixel observations (B, 28224) and:
+    1. Reshapes them to 4D format (B, 4, 84, 84) for CNN processing
+    2. Passes through CNN encoder
+    3. Passes encoded features to the downstream module
+    """
+
+    def __init__(self, cnn_encoder, module):
+        super().__init__()
+        self.cnn_encoder = cnn_encoder
+        self.module = module
+
+        # Store expected shapes
+        self.in_channels = cnn_encoder.in_channels
+        self.frame_size = 84
+        self.flat_dim = self.in_channels * self.frame_size * self.frame_size  # 28224
+
+    def forward(self, obs, *args, **kwargs):
+        """
+        Forward pass with automatic reshaping.
+
+        Args:
+            obs: Input observations, either (B, 28224) flat or already (B, 4, 84, 84)
+            *args: Additional arguments to pass to module
+            **kwargs: Additional keyword arguments to pass to module
+        """
+        # Handle different input shapes
+        if obs.ndim == 2:
+            # Flat input (B, 28224) - need to reshape
+            batch_size = obs.shape[0]
+            # Reshape: (B, 28224) -> (B, 4, 84, 84)
+            obs_4d = obs.reshape(batch_size, self.in_channels, self.frame_size, self.frame_size)
+            features = self.cnn_encoder(obs_4d)
+        elif obs.ndim == 4:
+            # Already 4D input - pass directly
+            features = self.cnn_encoder(obs)
+        else:
+            raise ValueError(f"Unexpected input shape: {obs.shape}. Expected (B, {self.flat_dim}) or (B, {self.in_channels}, {self.frame_size}, {self.frame_size})")
+
+        # Pass encoded features to module
+        return self.module(features, *args, **kwargs)
+
+
 if __name__ == '__main__':
     test_cnn_encoder()
