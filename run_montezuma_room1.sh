@@ -7,19 +7,23 @@
 #   - no_diff_in_rep: 1       → phi(s) not phi(s')-phi(s)  (state identity)
 #   - self_normalizing: 1     → L2-normalise phi → unit sphere
 #   - turn_off_dones: 1       → ignore episode boundaries in SF bootstrap
-#   - discrete: 1             → one-hot skills z ∈ {e_1,...,e_4}
+#   - discrete: 1             → one-hot skills z ∈ {e_1,...,e_8}
 #   - use_cnn_encoder: 1      → shared NatureCNN for pixel observations
 #   - alpha_min: 0.05         → entropy floor to prevent skill collapse
 #   - trans_optimization_epochs: 30  → fewer updates per rollout (prevents overfit)
 #   - sac_min_buffer_size: 2000      → start learning sooner
 #   - traj_batch_size: 8             → reasonable for 1 worker
 
+RESUME_DIR="exp/Montezuma-CSF-Dim8-2/sd000_1773322197_montezuma_room1_metra_sf"
+
 python run/train.py \
-    --run_group "Montezuma-CSF-Fixed" \
+    --run_group "Montezuma-CSF-Dim8-2" \
+    --resume_from "$RESUME_DIR" \
+    --resume_epoch 500 \
     --env "montezuma_room1" \
     --algo "metra_sf" \
     --max_path_length 500 \
-    --dim_option 4 \
+    --dim_option 8 \
     --discrete 1 \
     --inner 1 \
     --unit_length 0 \

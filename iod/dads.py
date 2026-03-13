@@ -7,9 +7,14 @@ from iod.metra import METRA
 class DADS(METRA):
     def __init__(
             self,
+            *,
+            num_alt_samples: int = 100,
+            split_group: int = 65536,
             **kwargs,
     ):
         super().__init__(**kwargs)
+        self.num_alt_samples = num_alt_samples
+        self.split_group = split_group
 
     def _train_components(self, epoch_data):
         if self.replay_buffer is not None and self.replay_buffer.n_transitions_stored < self.min_buffer_size:
@@ -41,9 +46,13 @@ class DADS(METRA):
     def _optimize_te(self, tensors, internal_vars):
         self._update_loss_sd(tensors, internal_vars)
 
+        # Train skill_dynamics (and CNN if present)
+        opt_keys = ['skill_dynamics']
+        if self._use_cnn_encoder:
+            opt_keys.append('cnn')
         self._gradient_descent(
             tensors['LossSd'],
-            optimizer_keys=['skill_dynamics'],
+            optimizer_keys=opt_keys,
         )
 
     def _process_sd_input(self, sd_input):
@@ -56,12 +65,24 @@ class DADS(METRA):
             sd_target = self._sd_target_batch_norm(sd_target)
         return sd_target
 
-    def _update_loss_sd(self, tensors, v):
-        next_obs = self._process_sd_target(v['next_obs'] - v['obs'])
+    def _encode_for_sd(self, obs, detach=False):
+        """Encode observations for skill dynamics.
 
-        sd_input = self._get_concat_obs(self._process_sd_input(v['obs']), v['options'])
+        When CNN is enabled, encode raw pixels → 512-dim vectors.
+        Otherwise pass through unchanged.
+        """
+        return self._encode_obs(obs, detach=detach)
+
+    def _update_loss_sd(self, tensors, v):
+        # Encode observations through CNN if enabled (with gradients for training)
+        obs_enc = self._encode_for_sd(v['obs'], detach=False)
+        next_obs_enc = self._encode_for_sd(v['next_obs'], detach=False)
+
+        next_obs_diff = self._process_sd_target(next_obs_enc - obs_enc)
+
+        sd_input = self._get_concat_obs(self._process_sd_input(obs_enc), v['options'])
         next_obs_dists = self.skill_dynamics(sd_input)
-        next_obs_log_probs = next_obs_dists.log_prob(next_obs)
+        next_obs_log_probs = next_obs_dists.log_prob(next_obs_diff)
 
         if self.turn_off_dones:
             v['dones'][...] = 0
@@ -83,10 +104,14 @@ class DADS(METRA):
 
     def _update_rewards(self, tensors, v):
         with torch.no_grad():
-            next_obs = self._process_sd_target(v['next_obs'] - v['obs'])
+            # Encode observations through CNN if enabled (detached for reward computation)
+            obs_enc = self._encode_for_sd(v['obs'], detach=True)
+            next_obs_enc = self._encode_for_sd(v['next_obs'], detach=True)
 
-            obs_repeated = torch.cat([v['obs']] * self.num_alt_samples, dim=0)
-            next_obs_repeated = torch.cat([next_obs] * self.num_alt_samples, dim=0)
+            next_obs_diff = self._process_sd_target(next_obs_enc - obs_enc)
+
+            obs_repeated = torch.cat([obs_enc] * self.num_alt_samples, dim=0)
+            next_obs_repeated = torch.cat([next_obs_diff] * self.num_alt_samples, dim=0)
 
             alt_options_shape = (obs_repeated.size(0), self.dim_option)
             if self.discrete:
@@ -98,8 +123,8 @@ class DADS(METRA):
                 else:
                     alt_options = torch.normal(mean=torch.zeros(alt_options_shape), std=torch.ones(alt_options_shape)).to(self.device)
 
-            sd_input = self._get_concat_obs(self._process_sd_input(v['obs']), v['options'])
-            next_obs_log_probs = self.skill_dynamics(sd_input).log_prob(next_obs)
+            sd_input = self._get_concat_obs(self._process_sd_input(obs_enc), v['options'])
+            next_obs_log_probs = self.skill_dynamics(sd_input).log_prob(next_obs_diff)
 
             split_group = self.split_group
             next_obs_alt_log_probs = []

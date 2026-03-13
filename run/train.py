@@ -612,7 +612,9 @@ def run(ctxt=None):
     # Setup skill dynamics
     # ********************
     sd_dim_option = args.dim_option
-    skill_dynamics_obs_dim = obs_dim
+    # When using CNN encoder, skill dynamics operates on CNN-encoded obs (512-dim)
+    # not raw pixels (28224-dim). This keeps the MLP tractable.
+    skill_dynamics_obs_dim = 512 if args.use_cnn_encoder else obs_dim
     skill_dynamics_input_dim = skill_dynamics_obs_dim + sd_dim_option
     module_cls, module_kwargs = get_gaussian_module_construction(
         args,
@@ -1056,6 +1058,16 @@ def run(ctxt=None):
             diayn_include_baseline=args.diayn_include_baseline,
             uniform_z=args.uniform_z,
         )
+
+        # Add CNN parameters if using CNN encoder (same as METRA/MetraSf)
+        if args.use_cnn_encoder:
+            algo_kwargs.update(
+                use_cnn_encoder=True,
+                cnn_type=args.cnn_type,
+                alpha_intrinsic=args.alpha_intrinsic,
+                cnn_learning_rate=args.common_lr,
+                cnn_encoder=shared_cnn_encoder,
+            )
 
         skill_common_args.update(
             inner=args.inner,
