@@ -319,22 +319,24 @@ def compute_separability_metrics(results, num_skills):
 # ──────────────────────────────────────────────────────────────
 
 def save_videos(results, num_skills, out_dir):
-    """Save per-skill videos for ALL episodes (not just ep 0)."""
+    """Save ONE video per skill (the longest episode)."""
     video_dir = out_dir / 'videos'
     video_dir.mkdir(exist_ok=True)
     
     for skill_idx in range(num_skills):
-        for ep_idx, ep_result in enumerate(results[skill_idx]):
-            frames = ep_result.get('frames', [])
-            if not frames:
-                continue
-            path = video_dir / f'skill{skill_idx}_ep{ep_idx}.mp4'
-            try:
-                imageio.mimsave(str(path), frames, fps=30)
-            except Exception as e:
-                print(f"    [video save failed: {e}]")
+        # Pick the episode with the most frames
+        best_ep = max(results[skill_idx],
+                      key=lambda ep: len(ep.get('frames', [])))
+        frames = best_ep.get('frames', [])
+        if not frames:
+            continue
+        path = video_dir / f'skill{skill_idx}.mp4'
+        try:
+            imageio.mimsave(str(path), frames, fps=30)
+        except Exception as e:
+            print(f"    [video save failed: {e}]")
     
-    print(f"  ✓ Videos saved to {video_dir}")
+    print(f"  ✓ Videos saved to {video_dir} (1 per skill)")
 
 
 def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name):
@@ -458,6 +460,124 @@ def plot_phi_space(results, num_skills, out_dir, mode_name):
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  ✓ Phi space: {path.name}")
+
+
+def plot_phi_trajectory_arrows(results, num_skills, out_dir, mode_name):
+    """
+    Mean φ-direction arrow per skill.
+
+    For each skill we compute the average start-φ and average end-φ across
+    all episodes, project into the top-2 PCA dimensions, and draw one bold
+    arrow per skill.  Individual episode lines are shown faintly behind.
+    """
+    from sklearn.decomposition import PCA
+
+    # ── Collect start / end phi for every trajectory ──
+    starts, ends, skill_ids = [], [], []
+    for s in range(num_skills):
+        for ep in results[s]:
+            phis = ep['phis']
+            if len(phis) < 2:
+                continue
+            starts.append(phis[0])
+            ends.append(phis[-1])
+            skill_ids.append(s)
+
+    if not starts:
+        return
+
+    starts = np.array(starts)
+    ends   = np.array(ends)
+    skill_ids = np.array(skill_ids)
+    dim = starts.shape[1]
+
+    # ── PCA projection ──
+    all_pts = np.concatenate([starts, ends], axis=0)
+    if dim > 2:
+        pca = PCA(n_components=2)
+        all_2d = pca.fit_transform(all_pts)
+        xlabel = f'PC1 ({pca.explained_variance_ratio_[0]:.1%})'
+        ylabel = f'PC2 ({pca.explained_variance_ratio_[1]:.1%})'
+    else:
+        all_2d = all_pts[:, :2]
+        xlabel, ylabel = 'φ₀', 'φ₁'
+
+    n = len(starts)
+    starts_2d = all_2d[:n]
+    ends_2d   = all_2d[n:]
+
+    # ── Compute per-skill mean displacement (in full dim) ──
+    # We work in the original φ-space so that "magnitude" is meaningful,
+    # then normalise the 2-D projected displacement to unit length so the
+    # plot only shows *direction*.  Actual magnitude is printed in the
+    # legend so collapsed methods are immediately obvious.
+    mean_displacements_2d = np.zeros((num_skills, 2))
+    raw_magnitudes = np.zeros(num_skills)          # full-dim magnitude
+    for s in range(num_skills):
+        mask = skill_ids == s
+        if mask.sum() == 0:
+            continue
+        mean_start_2d = starts_2d[mask].mean(axis=0)
+        mean_end_2d   = ends_2d[mask].mean(axis=0)
+        mean_displacements_2d[s] = mean_end_2d - mean_start_2d
+        # Full-dim magnitude (not PCA-projected) for the annotation
+        raw_magnitudes[s] = np.linalg.norm(
+            ends[mask].mean(axis=0) - starts[mask].mean(axis=0)
+        )
+
+    # ── Plot: unit-length arrows from origin ──
+    fig, ax = plt.subplots(figsize=(8, 8))
+    cmap_fn = cm.get_cmap('hsv', num_skills + 1)
+
+    for s in range(num_skills):
+        if (skill_ids == s).sum() == 0:
+            continue
+        d = mean_displacements_2d[s]
+        length = np.linalg.norm(d)
+        if length < 1e-12:
+            continue                               # truly zero — skip
+        direction = d / length                      # unit vector
+        ax.annotate('',
+                    xy=(direction[0], direction[1]),
+                    xytext=(0, 0),
+                    arrowprops=dict(arrowstyle='->', color=cmap_fn(s),
+                                   lw=2.5, mutation_scale=15))
+        ax.plot([], [], color=cmap_fn(s), linewidth=2.5,
+                label=f'Skill {s}  (|Δφ|={raw_magnitudes[s]:.4f})')
+
+    # Compute angular spread for subtitle
+    angles = []
+    for s in range(num_skills):
+        d = mean_displacements_2d[s]
+        if np.linalg.norm(d) > 1e-12:
+            angles.append(np.arctan2(d[1], d[0]))
+    if len(angles) >= 2:
+        angles_sorted = np.sort(angles)
+        gaps = np.diff(angles_sorted)
+        gaps = np.append(gaps, 2 * np.pi - (angles_sorted[-1] - angles_sorted[0]))
+        angular_spread = np.degrees(2 * np.pi - np.max(gaps))
+    else:
+        angular_spread = 0.0
+
+    ax.set_xlabel('Normalised PC1 direction', fontsize=12)
+    ax.set_ylabel('Normalised PC2 direction', fontsize=12)
+    ax.set_title(f'Skill φ-Directions (unit-normalised) — {mode_name}\n'
+                 f'{num_skills} skills · angular spread {angular_spread:.0f}°',
+                 fontsize=14, fontweight='bold')
+    ax.legend(fontsize=8, ncol=1, loc='upper left',
+              bbox_to_anchor=(1.02, 1), borderaxespad=0)
+    ax.set_xlim(-1.3, 1.3)
+    ax.set_ylim(-1.3, 1.3)
+    ax.grid(True, alpha=0.2)
+    ax.axhline(0, color='grey', linewidth=0.5)
+    ax.axvline(0, color='grey', linewidth=0.5)
+    ax.set_aspect('equal')
+    plt.tight_layout()
+
+    path = out_dir / f'phi_arrows_{mode_name}.png'
+    plt.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Phi trajectory arrows: {path.name}")
 
 
 def plot_phi_dimensions(results, num_skills, out_dir, mode_name):
@@ -710,6 +830,7 @@ Examples:
         save_videos(results_det, num_skills, out_det)
         make_montage(results_det, num_skills, args.episodes_per_option, out_det, "deterministic")
         plot_phi_space(results_det, num_skills, out_det, "deterministic")
+        plot_phi_trajectory_arrows(results_det, num_skills, out_det, "deterministic")
         plot_phi_dimensions(results_det, num_skills, out_det, "deterministic")
         plot_heatmaps(results_det, num_skills, out_det, "deterministic")
         plot_trajectory_traces(results_det, num_skills, out_det, "deterministic")
@@ -734,6 +855,7 @@ Examples:
         save_videos(results_rand, num_skills, out_rand)
         make_montage(results_rand, num_skills, args.episodes_per_option, out_rand, "randomised")
         plot_phi_space(results_rand, num_skills, out_rand, "randomised")
+        plot_phi_trajectory_arrows(results_rand, num_skills, out_rand, "randomised")
         plot_phi_dimensions(results_rand, num_skills, out_rand, "randomised")
         plot_heatmaps(results_rand, num_skills, out_rand, "randomised")
         plot_trajectory_traces(results_rand, num_skills, out_rand, "randomised")
