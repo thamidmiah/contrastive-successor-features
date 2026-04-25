@@ -120,9 +120,14 @@ def prepare_algo(data):
 # ──────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def rollout_skill(algo, env, skill_idx, max_steps=500, record_video=True):
+def rollout_skill(algo, env, skill_idx, max_steps=500, record_video=True,
+                  option_vector=None):
     """
     Roll out a single skill for one episode.
+    
+    Args:
+        option_vector: If provided, use this z vector directly (for continuous z).
+                       If None, use one-hot encoding of skill_idx (discrete z).
     
     Returns dict with: obs, phis, positions, rewards, frames, length, total_reward
     """
@@ -132,9 +137,12 @@ def rollout_skill(algo, env, skill_idx, max_steps=500, record_video=True):
     num_skills = algo.dim_option
     device = torch.device('cpu')
 
-    # One-hot skill vector
-    option = np.zeros(num_skills, dtype=np.float32)
-    option[skill_idx] = 1.0
+    # Skill vector: use provided continuous z, or fall back to one-hot
+    if option_vector is not None:
+        option = option_vector.astype(np.float32)
+    else:
+        option = np.zeros(num_skills, dtype=np.float32)
+        option[skill_idx] = 1.0
 
     obs = env.reset()
     obs_flat = obs.flatten().astype(np.float32)
@@ -199,12 +207,15 @@ def rollout_skill(algo, env, skill_idx, max_steps=500, record_video=True):
     }
 
 
-def run_evaluation(algo, mode, num_skills, episodes_per_option, max_steps, seed):
+def run_evaluation(algo, mode, num_skills, episodes_per_option, max_steps, seed,
+                   option_vectors=None):
     """
     Run full evaluation for one mode.
     
     Args:
         mode: 'deterministic' or 'randomised'
+        option_vectors: If provided, list of (label, z_vector) tuples for continuous z.
+                        If None, uses discrete one-hot skills.
     
     Returns:
         results: dict[skill_idx] -> list of episode dicts
@@ -220,8 +231,17 @@ def run_evaluation(algo, mode, num_skills, episodes_per_option, max_steps, seed)
 
     results = {}
     
-    for skill_idx in range(num_skills):
+    # Determine what skills to evaluate
+    if option_vectors is not None:
+        skill_list = list(range(len(option_vectors)))
+    else:
+        skill_list = list(range(num_skills))
+    
+    for skill_idx in skill_list:
         results[skill_idx] = []
+        z_vec = option_vectors[skill_idx][1] if option_vectors is not None else None
+        z_label = option_vectors[skill_idx][0] if option_vectors is not None else f"skill {skill_idx}"
+        
         for ep in range(episodes_per_option):
             # Seed control: deterministic mode uses fixed seed per (skill, ep)
             if is_det:
@@ -233,7 +253,8 @@ def run_evaluation(algo, mode, num_skills, episodes_per_option, max_steps, seed)
                 np.random.seed(ep_seed)
                 torch.manual_seed(ep_seed)
 
-            result = rollout_skill(algo, env, skill_idx, max_steps=max_steps, record_video=True)
+            result = rollout_skill(algo, env, skill_idx, max_steps=max_steps,
+                                   record_video=True, option_vector=z_vec)
             results[skill_idx].append(result)
             
             pos_str = ""
@@ -241,7 +262,7 @@ def run_evaluation(algo, mode, num_skills, episodes_per_option, max_steps, seed)
                 final_pos = result['positions'][-1]
                 pos_str = f"  final_pos=({final_pos[0]}, {final_pos[1]})"
             
-            print(f"    skill {skill_idx} ep {ep}: len={result['length']:3d}  "
+            print(f"    {z_label} ep {ep}: len={result['length']:3d}  "
                   f"reward={result['total_reward']:.0f}  "
                   f"phi_norm={np.linalg.norm(result['phis'][-1]):.3f}{pos_str}")
     
@@ -339,25 +360,49 @@ def save_videos(results, num_skills, out_dir):
     print(f"  ✓ Videos saved to {video_dir} (1 per skill)")
 
 
-def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name):
+def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name,
+                 n_cols=6):
     """
-    Side-by-side montage grid: rows = skills, columns = episodes.
-    Each cell shows a representative frame (middle of episode).
+    Side-by-side montage grid: rows = skills, columns = temporal snapshots.
+    For each skill, the longest episode is chosen and n_cols frames are sampled
+    at uniform intervals across its timeline, giving a sense of progression.
+    Column headers show the actual timestep (e.g. "t=0", "t=83", ...).
     """
-    # Collect representative frames
-    grid = []
+    # For each skill pick the longest episode and sample n_cols frames uniformly
+    grid = []          # grid[skill_idx] = list of n_cols frames (or None)
+    col_timesteps = []  # will be set from the first skill that has frames
+
     for skill_idx in range(num_skills):
-        row = []
+        # Find the episode with the most frames for this skill
+        best_frames = []
         for ep_idx in range(episodes_per_option):
             frames = results[skill_idx][ep_idx].get('frames', [])
-            if frames:
-                mid = len(frames) // 2
-                row.append(frames[mid])
-            else:
-                row.append(None)
+            if len(frames) > len(best_frames):
+                best_frames = frames
+
+        if not best_frames:
+            grid.append([None] * n_cols)
+            continue
+
+        n = len(best_frames)
+        # Uniform indices spanning [0, n-1]
+        if n_cols == 1:
+            indices = [n // 2]
+        else:
+            indices = [int(round(i * (n - 1) / (n_cols - 1))) for i in range(n_cols)]
+
+        row = [best_frames[idx] for idx in indices]
         grid.append(row)
-    
-    # Check we have at least one frame
+
+        # Record timestep labels from the first skill that has data
+        if not col_timesteps:
+            col_timesteps = indices
+
+    # Fill default timestep labels if nothing was set
+    if not col_timesteps:
+        col_timesteps = list(range(n_cols))
+
+    # Find any valid frame to get dimensions
     any_frame = None
     for row in grid:
         for f in row:
@@ -366,50 +411,60 @@ def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name):
                 break
         if any_frame is not None:
             break
-    
+
     if any_frame is None:
         print("  [skip] No frames for montage")
         return
-    
+
     h, w = any_frame.shape[:2]
-    pad = 4  # pixels between cells
-    
-    # Build the montage image
-    cols = episodes_per_option
+    pad = 4          # pixels between cells
+    header_px = 22  # extra space at top for timestep labels
+
     rows = num_skills
+    cols = n_cols
     montage_h = rows * h + (rows - 1) * pad
     montage_w = cols * w + (cols - 1) * pad
-    montage = np.ones((montage_h, montage_w, 3), dtype=np.uint8) * 40  # dark grey bg
-    
+    # Canvas with room for column headers
+    canvas_h = montage_h + header_px
+    canvas = np.ones((canvas_h, montage_w, 3), dtype=np.uint8) * 40  # dark grey bg
+
     cmap_fn = cm.get_cmap('tab10')
-    
+
     for r in range(rows):
         for c in range(cols):
             frame = grid[r][c]
             if frame is None:
                 continue
-            y0 = r * (h + pad)
+            y0 = header_px + r * (h + pad)
             x0 = c * (w + pad)
-            # Add coloured border (2px) to identify skill
+            # Coloured border (2 px) to identify skill
             color = np.array(cmap_fn(r)[:3]) * 255
             bordered = frame.copy()
             bordered[:2, :] = color
             bordered[-2:, :] = color
             bordered[:, :2] = color
             bordered[:, -2:] = color
-            montage[y0:y0+h, x0:x0+w] = bordered
-    
-    fig, ax = plt.subplots(1, 1, figsize=(2 * cols + 1, 2 * rows + 1))
-    ax.imshow(montage)
-    ax.set_title(f'Skill Montage — {mode_name}\n(rows=skills, cols=episodes)', fontweight='bold')
+            canvas[y0:y0+h, x0:x0+w] = bordered
+
+    fig, ax = plt.subplots(1, 1, figsize=(2.2 * cols + 1, 2 * rows + 1.2))
+    ax.imshow(canvas)
+    ax.set_title(f'Skill Montage — {mode_name}\n(rows = skills, cols = time snapshots)',
+                 fontweight='bold')
     ax.axis('off')
-    
-    # Add row labels
+
+    # Column headers: timestep labels centred on each column
+    for c, t in enumerate(col_timesteps):
+        x_center = c * (w + pad) + w // 2
+        ax.text(x_center, header_px // 2, f't={t}',
+                va='center', ha='center', fontsize=9, color='white',
+                fontweight='bold')
+
+    # Row labels (skill index, coloured)
     for r in range(rows):
-        y_center = r * (h + pad) + h // 2
+        y_center = header_px + r * (h + pad) + h // 2
         ax.text(-10, y_center, f'S{r}', va='center', ha='right',
                 fontsize=11, fontweight='bold', color=cmap_fn(r))
-    
+
     plt.tight_layout()
     path = out_dir / f'montage_{mode_name}.png'
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -442,12 +497,13 @@ def plot_phi_space(results, num_skills, out_dir, mode_name):
         ylabel = f'PC2 ({pca.explained_variance_ratio_[1]:.1%})'
     
     fig, ax = plt.subplots(figsize=(10, 8))
-    cmap_fn = cm.get_cmap('tab10')
+    cmap_name = 'tab10' if num_skills <= 10 else 'tab20'
+    cmap_fn = cm.get_cmap(cmap_name)
     
     for s in range(num_skills):
         mask = labels == s
         ax.scatter(phis_2d[mask, 0], phis_2d[mask, 1],
-                   c=[cmap_fn(s)], label=f'Skill {s}', alpha=0.4, s=15)
+                   c=[cmap_fn(s % cmap_fn.N)], label=f'Skill {s}', alpha=0.4, s=15)
     
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
@@ -543,9 +599,9 @@ def plot_phi_trajectory_arrows(results, num_skills, out_dir, mode_name):
                     arrowprops=dict(arrowstyle='->', color=cmap_fn(s),
                                    lw=2.5, mutation_scale=15))
         ax.plot([], [], color=cmap_fn(s), linewidth=2.5,
-                label=f'Skill {s}  (|Δφ|={raw_magnitudes[s]:.4f})')
+                label=f'Skill {s}')
 
-    # Compute angular spread for subtitle
+    # Compute angular spread (kept for internal reference, removed from title)
     angles = []
     for s in range(num_skills):
         d = mean_displacements_2d[s]
@@ -561,10 +617,8 @@ def plot_phi_trajectory_arrows(results, num_skills, out_dir, mode_name):
 
     ax.set_xlabel('Normalised PC1 direction', fontsize=12)
     ax.set_ylabel('Normalised PC2 direction', fontsize=12)
-    ax.set_title(f'Skill φ-Directions (unit-normalised) — {mode_name}\n'
-                 f'{num_skills} skills · angular spread {angular_spread:.0f}°',
-                 fontsize=14, fontweight='bold')
-    ax.legend(fontsize=8, ncol=1, loc='upper left',
+    ax.set_title('Skill φ-Directions', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=9, ncol=1, loc='upper left',
               bbox_to_anchor=(1.02, 1), borderaxespad=0)
     ax.set_xlim(-1.3, 1.3)
     ax.set_ylim(-1.3, 1.3)
@@ -709,8 +763,14 @@ def plot_trajectory_traces(results, num_skills, out_dir, mode_name):
     print(f"  ✓ Trajectory traces: {path.name}")
 
 
-def write_report(metrics_det, metrics_rand, num_skills, epoch, out_dir):
+def write_report(metrics_det, metrics_rand, num_skills, epoch, out_dir,
+                 skill_labels=None):
     """Write a text summary report."""
+    def skill_name(s):
+        if skill_labels and s < len(skill_labels):
+            return skill_labels[s]
+        return f"Skill {s}"
+    
     lines = []
     lines.append("=" * 60)
     lines.append("SKILL EVALUATION REPORT")
@@ -732,13 +792,13 @@ def write_report(metrics_det, metrics_rand, num_skills, epoch, out_dir):
             cov = metrics['coverage_per_skill'].get(s, 0)
             avg_len = metrics['mean_lengths'].get(s, 0)
             c = metrics['centroids'][s]
-            lines.append(f"    Skill {s}: coverage={cov:3d} cells, "
+            lines.append(f"    {skill_name(s)}: coverage={cov:3d} cells, "
                          f"avg_len={avg_len:.0f}, "
                          f"centroid=[{', '.join(f'{v:.3f}' for v in c)}]")
         
         lines.append(f"\n  Pairwise φ distances:")
         for (i, j), d in sorted(metrics['per_pair_distances'].items()):
-            lines.append(f"    Skill {i} <-> Skill {j}: {d:.4f}")
+            lines.append(f"    {skill_name(i)} <-> {skill_name(j)}: {d:.4f}")
     
     lines.append("\n" + "=" * 60)
     
@@ -788,6 +848,11 @@ Examples:
                         help='Evaluation mode (default: both)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Base random seed (default: 42)')
+    parser.add_argument('--continuous', action='store_true', default=False,
+                        help='Evaluate with continuous z (random unit-sphere directions). '
+                             'Use for models trained with --discrete 0.')
+    parser.add_argument('--num_continuous_skills', type=int, default=16,
+                        help='Number of random z directions to evaluate (only with --continuous)')
     
     args = parser.parse_args()
     
@@ -798,13 +863,34 @@ Examples:
     
     data, epoch = load_checkpoint(args.exp_dir, args.checkpoint_epoch)
     algo = prepare_algo(data)
-    num_skills = algo.dim_option
+    dim_option = algo.dim_option
+    
+    # ── Build skill z-vectors ──
+    # Continuous: random directions on the unit sphere (matching training distribution)
+    # Discrete:   dim_option one-hot vectors (handled inside rollout_skill)
+    if args.continuous:
+        n = args.num_continuous_skills
+        rng = np.random.RandomState(args.seed)  # reproducible
+        raw = rng.randn(n, dim_option).astype(np.float32)
+        raw = raw / np.linalg.norm(raw, axis=1, keepdims=True)  # unit sphere
+        option_vectors = [(f"z{i}", raw[i]) for i in range(n)]
+        num_skills = n
+        print(f"  Continuous z: {num_skills} random unit-sphere directions (dim={dim_option})")
+        for label, vec in option_vectors:
+            print(f"    {label}: [{', '.join(f'{v:.2f}' for v in vec)}]")
+    else:
+        option_vectors = None
+        num_skills = dim_option
     
     print(f"  Skills:     {num_skills}")
     print(f"  Episodes:   {args.episodes_per_option} per skill")
     print(f"  Max steps:  {args.max_steps}")
     print(f"  Mode:       {args.mode}")
     print(f"  Seed:       {args.seed}")
+    if args.continuous:
+        print(f"  Z type:     continuous (unit-sphere)")
+    else:
+        print(f"  Z type:     discrete (one-hot)")
     
     # Output directory
     out_base = Path(args.exp_dir) / "skill_eval" / f"epoch_{epoch}"
@@ -823,7 +909,8 @@ Examples:
         
         results_det = run_evaluation(
             algo, 'deterministic', num_skills,
-            args.episodes_per_option, args.max_steps, args.seed
+            args.episodes_per_option, args.max_steps, args.seed,
+            option_vectors=option_vectors
         )
         
         print(f"\n  Generating visualisations...")
@@ -848,7 +935,8 @@ Examples:
         
         results_rand = run_evaluation(
             algo, 'randomised', num_skills,
-            args.episodes_per_option, args.max_steps, args.seed
+            args.episodes_per_option, args.max_steps, args.seed,
+            option_vectors=option_vectors
         )
         
         print(f"\n  Generating visualisations...")
@@ -863,7 +951,9 @@ Examples:
         metrics_rand = compute_separability_metrics(results_rand, num_skills)
     
     # ── REPORT ──
-    write_report(metrics_det, metrics_rand, num_skills, epoch, out_base)
+    skill_labels = [ov[0] for ov in option_vectors] if option_vectors else None
+    write_report(metrics_det, metrics_rand, num_skills, epoch, out_base,
+                 skill_labels=skill_labels)
     
     print(f"\n  All outputs in: {out_base}")
     print("  Done! ✓")

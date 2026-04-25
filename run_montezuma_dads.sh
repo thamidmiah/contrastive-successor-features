@@ -57,8 +57,8 @@ python run/train.py \
     --turn_off_dones 1 \
     --num_alt_samples 100 \
     --split_group 65536 \
-    --sd_batch_norm 0 \
-    --sd_const_std 0 \
+    --sd_batch_norm 1 \
+    --sd_const_std 1 \
     --n_parallel 1 \
     --eval_plot_axis -1 \
     --use_discrete_sac 1 \

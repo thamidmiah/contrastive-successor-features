@@ -49,7 +49,6 @@ python run/train.py \
     --sac_min_buffer_size 2000 \
     --sac_max_buffer_size 20000 \
     --common_lr 1e-4 \
-    --dual_reg 0 \
     --no_diff_in_rep 1 \
     --self_normalizing 1 \
     --turn_off_dones 1 \
