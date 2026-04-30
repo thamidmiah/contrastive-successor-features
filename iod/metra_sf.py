@@ -10,23 +10,11 @@ from iod.sac_utils import _clip_actions
 
 class MetraSf(METRA):
     """Contrastive Successor Features (CSF).
-
-    Learns a trajectory encoder phi(s) and successor feature networks
-    psi(s,z,a) such that psi ≈ phi(s) + gamma * psi(s',z,a').
-    The policy maximises Q(s,z) = psi(s,z,a)^T z.
-
-    Key differences from base METRA:
-      - Q-networks output *vectors* (dim_option) not scalars.
-      - Policy loss uses SF inner product with z, not scalar Q.
-      - Separate SF TD-learning step (no reward shaping).
+    This class implements a version of METRA that uses successor features to learn a policy instead of relying on SAC.
     """
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    # ------------------------------------------------------------------
-    # Training loop
-    # ------------------------------------------------------------------
     def _train_components(self, epoch_data: Dict[str, torch.tensor]) -> Dict:
         if self.replay_buffer is not None and self.replay_buffer.n_transitions_stored < self.min_buffer_size:
             return {}
@@ -50,19 +38,23 @@ class MetraSf(METRA):
             # 1) Update trajectory encoder (phi) — trains CNN if enabled
             self._optimize_te(train_store, mini_batch)
 
-            # 2) Update successor feature networks (psi)
+            # 2) Update successor feature networks
             self._optimize_sf(train_store, mini_batch)
 
-            # 3) Optimise policy (pi) and alpha
+            # 3) Optimise policy 
             self._optimize_op(train_store, mini_batch)
 
         sys.stdout.write('\n')
         return train_store
 
-    # ------------------------------------------------------------------
-    # SF optimiser
-    # ------------------------------------------------------------------
     def _optimize_sf(self, train_store: Dict, mini_batch: Dict) -> None:
+        """Computes the successor feature loss and optimizes it with gradient descent.
+
+        Args:
+            train_store (Dict): train store
+            mini_batch (Dict): mini batch data
+        """
+
         self._update_loss_sf_td(train_store, mini_batch)
 
         self._gradient_descent(
@@ -72,10 +64,13 @@ class MetraSf(METRA):
 
         self._update_targets()
 
-    # ------------------------------------------------------------------
-    # Policy optimiser  (handles both discrete and continuous actions)
-    # ------------------------------------------------------------------
     def _optimize_op(self, train_store: Dict, mini_batch: Dict) -> None:
+        """Optimizes the policy and the entropy coefficient.
+
+        Args:
+            train_store (Dict): train store
+            mini_batch (Dict): mini batch data
+        """
         # Encode observations through CNN (detached — policy shouldn't train CNN)
         obs_encoded = self._encode_obs(mini_batch['obs'], detach=True)
         states = self._get_concat_obs(obs_encoded, mini_batch['options'])
@@ -86,12 +81,11 @@ class MetraSf(METRA):
         if self.use_discrete_sac:
             # --- Discrete action space (Atari) ---
             action_dists = self.option_policy._module(states)
-            act_probs = action_dists.probs                     # (B, n_actions)
+            act_probs = action_dists.probs                    
             logits = action_dists.logits
-            log_probs = torch.log_softmax(logits, dim=-1)      # (B, n_actions)
+            log_probs = torch.log_softmax(logits, dim=-1)
 
             # SF networks: (B, n_actions, dim_option) — one SF vector per action
-            # We need to compute psi for every action, then dot with z
             n_actions = act_probs.shape[-1]
             # Build one-hot action matrix
             eye_actions = torch.eye(n_actions, device=self.device)  # (n_actions, n_actions)
@@ -167,10 +161,13 @@ class MetraSf(METRA):
             with torch.no_grad():
                 self.log_alpha.param.data.clamp_(min=self._log_alpha_min)
 
-    # ------------------------------------------------------------------
-    # Successor feature TD loss  (handles both discrete and continuous)
-    # ------------------------------------------------------------------
     def _update_loss_sf_td(self, train_store: Dict, mini_batch: Dict) -> None:
+        """Computes the successor feature loss.
+
+        Args:
+            train_store (Dict): train store
+            mini_batch (Dict): mini batch data
+        """
         obs = mini_batch['obs']
         next_obs = mini_batch['next_obs']
         actions = mini_batch['actions']
@@ -191,7 +188,7 @@ class MetraSf(METRA):
         else:
             actions_onehot = actions
 
-        # --- Encode observations through CNN (detached for SF networks) ---
+        # --- Encode observations through CNN ---
         obs_encoded = self._encode_obs(obs, detach=True)
         next_obs_encoded = self._encode_obs(next_obs, detach=True)
 
@@ -213,7 +210,7 @@ class MetraSf(METRA):
             if self.use_discrete_sac:
                 # Discrete: expectation over actions weighted by policy probs
                 next_action_dists = self.option_policy._module(next_processed_cat_obs)
-                act_probs = next_action_dists.probs  # (B, n_actions)
+                act_probs = next_action_dists.probs
                 n_actions = act_probs.shape[-1]
                 B = next_processed_cat_obs.shape[0]
 
@@ -221,32 +218,23 @@ class MetraSf(METRA):
                 next_exp = next_processed_cat_obs.unsqueeze(1).expand(B, n_actions, -1).reshape(B * n_actions, -1)
                 act_exp = eye_actions.unsqueeze(0).expand(B, -1, -1).reshape(B * n_actions, -1)
 
-                tsf1 = self.target_qf1(next_exp, act_exp).reshape(B, n_actions, -1)  # (B, n_actions, dim_option)
+                tsf1 = self.target_qf1(next_exp, act_exp).reshape(B, n_actions, -1)  
                 tsf2 = self.target_qf2(next_exp, act_exp).reshape(B, n_actions, -1)
 
                 # Q values per action for min selection
-                q1_per_a = (tsf1 * next_options.unsqueeze(1)).sum(dim=-1)  # (B, n_actions)
+                q1_per_a = (tsf1 * next_options.unsqueeze(1)).sum(dim=-1) 
                 q2_per_a = (tsf2 * next_options.unsqueeze(1)).sum(dim=-1)
-                q_min_per_a = torch.min(q1_per_a, q2_per_a)  # (B, n_actions)
+                q_min_per_a = torch.min(q1_per_a, q2_per_a)  
 
-                # Select SF from the network that gave the min Q for each action
-                # Then take expectation over actions weighted by policy
-                use_sf1 = (q1_per_a <= q2_per_a).unsqueeze(-1).float()  # (B, n_actions, 1)
-                tsf_min = use_sf1 * tsf1 + (1 - use_sf1) * tsf2          # (B, n_actions, dim_option)
+                use_sf1 = (q1_per_a <= q2_per_a).unsqueeze(-1).float() 
+                tsf_min = use_sf1 * tsf1 + (1 - use_sf1) * tsf2         
 
-                # Entropy bonus for target (soft Bellman)
                 logits = next_action_dists.logits
-                log_probs = torch.log_softmax(logits, dim=-1)             # (B, n_actions)
+                log_probs = torch.log_softmax(logits, dim=-1)            
                 alpha_val = self.log_alpha.param.exp()
 
-                # Weighted sum: sum_a pi(a|s')[psi(s',z,a) - alpha * log pi(a|s') * z]
-                # The entropy term is scalar per action, broadcast to dim_option via z
-                entropy_bonus = -alpha_val * log_probs  # (B, n_actions)
-                # target_next_sf = sum_a pi(a|s') * [psi - alpha*log_pi * z_direction]
-                # But SF target should be: phi(s) + gamma * E_a'[psi(s',z,a')]
-                # Entropy is handled in the policy loss, not in SF target.
-                # Keep it simple: target = E_a'~pi [psi(s',z,a')]
-                target_next_sf = (act_probs.unsqueeze(-1) * tsf_min).sum(dim=1)  # (B, dim_option)
+                entropy_bonus = -alpha_val * log_probs  
+                target_next_sf = (act_probs.unsqueeze(-1) * tsf_min).sum(dim=1)  
             else:
                 # Continuous: sample next actions from policy
                 next_action_dists = self.option_policy._module(next_processed_cat_obs)
@@ -279,13 +267,11 @@ class MetraSf(METRA):
         loss_sf1 = F.mse_loss(sf1_pred, sf_target)
         loss_sf2 = F.mse_loss(sf2_pred, sf_target)
 
-        # Representation diagnostics (always logged, regardless of dual_reg)
         phi_x = cur_repr.detach()
         phi_y = next_repr.detach()
         phi_diff = phi_y - phi_x
         phi_diff_l2 = torch.square(phi_diff).sum(dim=1).mean()
 
-        # Per-dimension variance of phi — if any dimension has ~0 variance, it's dead
         phi_dim_var = phi_x.var(dim=0)  # (dim_option,)
 
         train_store.update({
@@ -309,9 +295,6 @@ class MetraSf(METRA):
             'next_processed_cat_obs': next_processed_cat_obs,
         })
 
-    # ------------------------------------------------------------------
-    # Target network update
-    # ------------------------------------------------------------------
     def _update_targets(self) -> None:
         target_sfs = [self.target_qf1, self.target_qf2]
         sfs = [self.qf1, self.qf2]

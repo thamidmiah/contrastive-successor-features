@@ -12,15 +12,6 @@ Two evaluation modes:
      - Multiple seeds, noop_max=30
      - Answers: "Do skills remain distinct under perturbations?"
 
-Outputs per mode:
-  - Per-skill videos (all episodes, not just ep 0)
-  - Side-by-side montage grid (1 row per skill, columns = episodes)
-  - Phi-space scatter plot (coloured by skill)
-  - Per-dimension phi box plots
-  - Position heatmaps (Montezuma)
-  - Skill separability metrics (pairwise phi distance, state coverage)
-  - Summary report (text)
-
 Usage:
   # Both modes, checkpoint epoch 500
   python evaluate_skills.py \\
@@ -41,7 +32,7 @@ Usage:
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-import dowel_wrapper  # Must be first — prevents import errors
+import dowel_wrapper
 
 import numpy as np
 import torch
@@ -58,11 +49,6 @@ from itertools import combinations
 
 from envs.atari.atari_env import AtariEnv
 from envs.atari.montezuma_room1_wrapper import MontezumaRoom1Wrapper
-
-
-# ──────────────────────────────────────────────────────────────
-# Loading & Environment
-# ──────────────────────────────────────────────────────────────
 
 def load_checkpoint(exp_dir, epoch=None):
     """Load trained models from checkpoint."""
@@ -81,12 +67,11 @@ def load_checkpoint(exp_dir, epoch=None):
     with open(itr_path, 'rb') as f:
         data = pickle.load(f)
     
-    print(f"  ✓ Loaded checkpoint epoch {epoch}")
+    print(f"Loaded checkpoint epoch {epoch}")
     return data, epoch
 
 
 def make_env(noop_max=30):
-    """Create Montezuma Room 1 environment with configurable noop."""
     base_env = AtariEnv(
         game='MontezumaRevenge',
         frame_stack=4,
@@ -99,7 +84,6 @@ def make_env(noop_max=30):
 
 
 def prepare_algo(data):
-    """Move algo to CPU, set eval mode."""
     algo = data.get('algo')
     if algo is None:
         raise ValueError("'algo' not found in checkpoint. Keys: " + str(list(data.keys())))
@@ -113,11 +97,6 @@ def prepare_algo(data):
         algo.cnn_encoder = algo.cnn_encoder.to(device)
         algo.cnn_encoder.eval()
     return algo
-
-
-# ──────────────────────────────────────────────────────────────
-# Rollout
-# ──────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def rollout_skill(algo, env, skill_idx, max_steps=500, record_video=True,
@@ -272,29 +251,13 @@ def run_evaluation(algo, mode, num_skills, episodes_per_option, max_steps, seed,
     return results
 
 
-# ──────────────────────────────────────────────────────────────
-# Metrics
-# ──────────────────────────────────────────────────────────────
-
 def compute_separability_metrics(results, num_skills):
-    """
-    Compute skill separability metrics.
-    
-    Returns dict with:
-      - mean_pairwise_phi_dist: average L2 distance between skill centroids
-      - per_pair_distances: dict of (i,j) -> distance
-      - mean_intra_variance: average within-skill phi variance
-      - coverage_per_skill: number of unique positions visited per skill
-      - mean_episode_length: per skill
-    """
-    # Compute per-skill phi centroids (average final phi across episodes)
     centroids = {}
     intra_vars = {}
     coverage = {}
     lengths = {}
     
     for skill_idx in range(num_skills):
-        # Use final phi of each episode
         final_phis = []
         all_positions = set()
         ep_lengths = []
@@ -334,11 +297,6 @@ def compute_separability_metrics(results, num_skills):
         'centroids': centroids,
     }
 
-
-# ──────────────────────────────────────────────────────────────
-# Visualisations
-# ──────────────────────────────────────────────────────────────
-
 def save_videos(results, num_skills, out_dir):
     """Save ONE video per skill (the longest episode)."""
     video_dir = out_dir / 'videos'
@@ -360,20 +318,11 @@ def save_videos(results, num_skills, out_dir):
     print(f"  ✓ Videos saved to {video_dir} (1 per skill)")
 
 
-def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name,
-                 n_cols=6):
-    """
-    Side-by-side montage grid: rows = skills, columns = temporal snapshots.
-    For each skill, the longest episode is chosen and n_cols frames are sampled
-    at uniform intervals across its timeline, giving a sense of progression.
-    Column headers show the actual timestep (e.g. "t=0", "t=83", ...).
-    """
-    # For each skill pick the longest episode and sample n_cols frames uniformly
+def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name, n_cols=6):
     grid = []          # grid[skill_idx] = list of n_cols frames (or None)
     col_timesteps = []  # will be set from the first skill that has frames
 
     for skill_idx in range(num_skills):
-        # Find the episode with the most frames for this skill
         best_frames = []
         for ep_idx in range(episodes_per_option):
             frames = results[skill_idx][ep_idx].get('frames', [])
@@ -437,7 +386,6 @@ def make_montage(results, num_skills, episodes_per_option, out_dir, mode_name,
                 continue
             y0 = header_px + r * (h + pad)
             x0 = c * (w + pad)
-            # Coloured border (2 px) to identify skill
             color = np.array(cmap_fn(r)[:3]) * 255
             bordered = frame.copy()
             bordered[:2, :] = color
@@ -562,11 +510,6 @@ def plot_phi_trajectory_arrows(results, num_skills, out_dir, mode_name):
     starts_2d = all_2d[:n]
     ends_2d   = all_2d[n:]
 
-    # ── Compute per-skill mean displacement (in full dim) ──
-    # We work in the original φ-space so that "magnitude" is meaningful,
-    # then normalise the 2-D projected displacement to unit length so the
-    # plot only shows *direction*.  Actual magnitude is printed in the
-    # legend so collapsed methods are immediately obvious.
     mean_displacements_2d = np.zeros((num_skills, 2))
     raw_magnitudes = np.zeros(num_skills)          # full-dim magnitude
     for s in range(num_skills):
@@ -591,8 +534,8 @@ def plot_phi_trajectory_arrows(results, num_skills, out_dir, mode_name):
         d = mean_displacements_2d[s]
         length = np.linalg.norm(d)
         if length < 1e-12:
-            continue                               # truly zero — skip
-        direction = d / length                      # unit vector
+            continue                               
+        direction = d / length                    
         ax.annotate('',
                     xy=(direction[0], direction[1]),
                     xytext=(0, 0),
@@ -601,7 +544,6 @@ def plot_phi_trajectory_arrows(results, num_skills, out_dir, mode_name):
         ax.plot([], [], color=cmap_fn(s), linewidth=2.5,
                 label=f'Skill {s}')
 
-    # Compute angular spread (kept for internal reference, removed from title)
     angles = []
     for s in range(num_skills):
         d = mean_displacements_2d[s]

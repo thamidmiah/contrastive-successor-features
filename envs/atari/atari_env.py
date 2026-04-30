@@ -55,7 +55,6 @@ class FrameStackWrapper(gym.Wrapper):
         if isinstance(obs, tuple):
             obs = obs[0] if len(obs) > 0 else obs
         
-        # Initialize frames with the first observation repeated
         self.frames = [obs.copy() for _ in range(self.num_frames)]
         return self._get_observation()
     
@@ -70,11 +69,8 @@ class FrameStackWrapper(gym.Wrapper):
         else:
             obs, reward, done, info = step_result
         
-        # CRITICAL: Clip rewards to [-1, 1] for Atari stability
-        # This is standard practice to prevent Q-value explosion
         reward = np.sign(reward)
         
-        # Add new frame and remove oldest
         self.frames.append(obs)
         self.frames = self.frames[-self.num_frames:]
         
@@ -194,8 +190,7 @@ class AtariEnv(gym.Wrapper):
             obs = reset_result[0]
         else:
             obs = reset_result
-        
-        # Convert LazyFrames to numpy array if needed
+
         if hasattr(obs, '__array__'):
             obs = np.array(obs)
         return obs
@@ -226,9 +221,7 @@ class AtariEnv(gym.Wrapper):
             done = terminated or truncated
         else:
             obs, reward, done, info = step_result
-        
-        # CRITICAL: Clip rewards to [-1, 1] for Atari stability
-        # This is standard practice to prevent Q-value explosion
+
         reward = np.sign(reward)
         
         # Convert LazyFrames to numpy array if needed
@@ -248,5 +241,4 @@ class AtariEnv(gym.Wrapper):
         return self.env.render()
     
     def close(self):
-        """Close the environment."""
         return self.env.close()

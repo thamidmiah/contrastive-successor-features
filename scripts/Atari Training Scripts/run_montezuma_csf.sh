@@ -17,7 +17,6 @@ python run/train.py \
     --env "montezuma_room1" \
     --algo "metra_sf" \
     --max_path_length 500 \
-    --dim_option 8 \
     --discrete 0 \
     --inner 1 \
     --unit_length 0 \
