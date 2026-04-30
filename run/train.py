@@ -158,7 +158,7 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         frame_stack = args.frame_stack if args.frame_stack is not None else 4
         base_env = AtariEnv(game='MontezumaRevenge', frame_stack=frame_stack, normalize_pixels=True)
         env = MontezumaRoom1Wrapper(base_env)
-        normalizer_type = 'off'  # No normalization for pixel observations
+        normalizer_type = 'off'
         # Atari envs have discrete action spaces — force discrete SAC
         args.use_discrete_sac = 1
 
@@ -167,14 +167,12 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         from envs.atari.atari_env import AtariEnv
         game_name = args.env.replace('atari_', '').replace('_', ' ').title().replace(' ', '')
         
-        # Special case for MsPacman (needs capital M and P)
         if game_name == 'Mspacman':
             game_name = 'MsPacman'
         
         frame_stack = args.frame_stack if args.frame_stack is not None else 4
         env = AtariEnv(game=game_name, frame_stack=frame_stack, normalize_pixels=True)
-        normalizer_type = 'off'  # No normalization for pixel observations
-        # Atari envs have discrete action spaces — force discrete SAC
+        normalizer_type = 'off'
         args.use_discrete_sac = 1
     
     else:

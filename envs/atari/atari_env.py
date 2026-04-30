@@ -1,7 +1,3 @@
-"""
-Atari environment wrapper with preprocessing.
-"""
-
 import gymnasium as gym
 import ale_py
 import numpy as np
@@ -16,10 +12,7 @@ gym.register_envs(ale_py)
 
 
 class NormalizePixels(gym.ObservationWrapper):
-    """Normalize pixel values to [0, 1] range."""
-    
     def observation(self, obs):
-        """Normalize observation."""
         return obs.astype(np.float32) / 255.0
 
 
@@ -30,14 +23,11 @@ class FrameStackWrapper(gym.Wrapper):
         super().__init__(env)
         self.num_frames = num_frames
         self.frames = None
-        
-        # Update observation space
+
         obs_shape = env.observation_space.shape
         if len(obs_shape) == 2:
-            # 2D observation (H, W) -> stack along new axis
             new_shape = (num_frames, obs_shape[0], obs_shape[1])
         elif len(obs_shape) == 3:
-            # 3D observation (H, W, C) -> stack frames in channel dimension
             new_shape = (obs_shape[0], obs_shape[1], obs_shape[2] * num_frames)
         else:
             raise ValueError(f"Unexpected observation shape: {obs_shape}")
@@ -62,7 +52,6 @@ class FrameStackWrapper(gym.Wrapper):
         """Step and update frame stack."""
         step_result = self.env.step(action)
         
-        # Handle both 4-tuple and 5-tuple returns
         if len(step_result) == 5:
             obs, reward, terminated, truncated, info = step_result
             done = terminated or truncated
@@ -79,10 +68,8 @@ class FrameStackWrapper(gym.Wrapper):
     def _get_observation(self):
         """Stack frames into single observation."""
         if len(self.frames[0].shape) == 2:
-            # 2D frames: stack along first axis
             return np.stack(self.frames, axis=0)
         else:
-            # 3D frames: concatenate along channel axis
             return np.concatenate(self.frames, axis=-1)
 
 
@@ -179,13 +166,11 @@ class AtariEnv(gym.Wrapper):
     
     @property
     def spec(self):
-        """Return custom spec for compatibility."""
         return self._custom_spec
     
     def reset(self, **kwargs):
         """Reset the environment."""
         reset_result = self.env.reset(**kwargs)
-        # Handle both tuple (obs, info) and single obs returns
         if isinstance(reset_result, tuple):
             obs = reset_result[0]
         else:
@@ -208,14 +193,12 @@ class AtariEnv(gym.Wrapper):
             if action.size == 1:
                 action = int(action.item())
             else:
-                # For multi-element, take argmax (for one-hot or probability distributions)
                 action = int(np.argmax(action))
         elif not isinstance(action, int):
             action = int(action)
         
         step_result = self.env.step(action)
         
-        # Handle both 4-tuple and 5-tuple returns
         if len(step_result) == 5:
             obs, reward, terminated, truncated, info = step_result
             done = terminated or truncated
@@ -224,20 +207,11 @@ class AtariEnv(gym.Wrapper):
 
         reward = np.sign(reward)
         
-        # Convert LazyFrames to numpy array if needed
         if hasattr(obs, '__array__'):
             obs = np.array(obs)
         return obs, reward, done, info
     
     def render(self, mode='rgb_array'):
-        """Render the environment.
-        
-        Args:
-            mode: Rendering mode ('rgb_array' for video recording)
-            
-        Returns:
-            RGB array if mode='rgb_array', None otherwise
-        """
         return self.env.render()
     
     def close(self):

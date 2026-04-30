@@ -1,31 +1,3 @@
-"""
-Montezuma's Revenge Room 1 Wrapper.
-
-Terminates the episode when the player leaves Room 1 (the starting throne room).
-Tracks player x/y position and key/torch/item pickup events via ALE RAM.
-
-Features:
-    - No-op reset randomisation: takes 0–30 NOOP actions at episode start
-      to create micro-state variety and help skill differentiation.
-    - Life-loss detection: terminates on death (not just room exit).
-
-RAM addresses (verified for ALE/MontezumaRevenge-v5):
-    RAM[3]  (0x03) : Room number. Starts at 1. Changes when player exits.
-    RAM[42] (0x2A) : Player Y position (screen pixel row, decreases = lower on screen).
-                     77 = starting platform height, 63 = lower platform.
-    RAM[34] (0x22) : Player X position (sprite pixel column).
-                     100/101 = starting x, changes as player moves left/right.
-    RAM[100](0x64) : Item / key pickup flag. Non-zero when key has been collected.
-    RAM[58] (0x3A) : Lives remaining (starts at 5, decreases on death).
-
-Usage:
-    from envs.atari.montezuma_room1_wrapper import MontezumaRoom1Wrapper
-    from envs.atari.atari_env import AtariEnv
-
-    base_env = AtariEnv(game='MontezumaRevenge', frame_stack=4, normalize_pixels=True)
-    env = MontezumaRoom1Wrapper(base_env)
-"""
-
 import gymnasium as gym
 import numpy as np
 
@@ -47,17 +19,14 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
       - 'left_room'  : bool, whether this step caused a room exit
     """
 
-    # --- Verified RAM addresses for ALE/MontezumaRevenge-v5 ---
-    RAM_ROOM   = 3    # 0x03 : Room number (1 = starting room)
-    RAM_PLAYER_Y = 42 # 0x2A : Player Y position
-    RAM_PLAYER_X = 34 # 0x22 : Player X position
-    RAM_KEY    = 100  # 0x64 : Key pickup flag (non-zero = key collected)
-    RAM_LIVES  = 58   # 0x3A : Lives remaining
+    RAM_ROOM   = 3    
+    RAM_PLAYER_Y = 42 
+    RAM_PLAYER_X = 34 
+    RAM_KEY    = 100  
+    RAM_LIVES  = 58
 
-    # Room 1 number as reported by ALE RAM at game start
     ROOM_1_NUMBER = 1
 
-    # NOOP action index in ALE (action 0 = NOOP)
     NOOP_ACTION = 0
 
     def __init__(self, env, noop_max=30):
@@ -74,21 +43,11 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
         self._has_key = False
         self._noop_max = noop_max
 
-    # ------------------------------------------------------------------
-    # Pass through the AtariEnv custom spec so garage / akro are happy
-    # ------------------------------------------------------------------
-
     @property
     def spec(self):
-        """Delegate to inner AtariEnv spec (has flat_dim attributes)."""
         return self.env.spec
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _get_ale(self):
-        """Walk the wrapper stack to find the ALE object."""
         e = self.env
         while hasattr(e, 'env'):
             if hasattr(e, 'unwrapped'):
@@ -97,7 +56,6 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
         return e.unwrapped.ale
 
     def _read_ram(self):
-        """Return the 128-byte RAM array."""
         return self._get_ale().getRAM()
 
     def _parse_state(self, ram):
@@ -110,10 +68,6 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
             'lives':    int(ram[self.RAM_LIVES]),
         }
 
-    # ------------------------------------------------------------------
-    # Gymnasium interface
-    # ------------------------------------------------------------------
-
     def reset(self, **kwargs):
         """Reset env, apply no-op randomisation, record initial room and lives."""
         result = self.env.reset(**kwargs)
@@ -124,9 +78,6 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
             obs, info = result, {}
 
         # --- No-op reset randomisation ---
-        # Take a random number of NOOP actions to create micro-state variety.
-        # This changes timing and sprite animations without altering the task,
-        # giving the policy slightly different initial conditions each episode.
         if self._noop_max > 0:
             n_noops = np.random.randint(0, self._noop_max + 1)
             for _ in range(n_noops):
@@ -134,7 +85,6 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
                 if len(step_result) == 5:
                     obs, _, terminated, truncated, info = step_result
                     if terminated or truncated:
-                        # Died during noops (very unlikely but be safe)
                         result = self.env.reset(**kwargs)
                         if isinstance(result, tuple):
                             obs = result[0]
@@ -172,7 +122,6 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
         """Step env and check room-exit / death conditions."""
         result = self.env.step(action, **kwargs)
 
-        # Unpack — inner AtariEnv returns 4-tuple (obs, rew, done, info)
         if len(result) == 5:
             obs, reward, terminated, truncated, info = result
         else:
@@ -211,6 +160,5 @@ class MontezumaRoom1Wrapper(gym.Wrapper):
             'left_room': left_room,
         })
 
-        # Return 4-tuple to match AtariEnv / rest of the codebase
         done = terminated or truncated
         return obs, reward, done, info
