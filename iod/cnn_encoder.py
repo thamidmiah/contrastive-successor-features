@@ -21,20 +21,18 @@ class NatureCNN(nn.Module):
         
         # Convolutional layers
         self.conv = nn.Sequential(
-            # Conv1: 84x84x4 -> 20x20x32
+   
             nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
             nn.ReLU(inplace=False),
             
-            # Conv2: 20x20x32 -> 9x9x64
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(inplace=False),
-            
-            # Conv3: 9x9x64 -> 7x7x64
+
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(inplace=False),
         )
         
-        # Calculate flattened size: 7 * 7 * 64 = 3136
+        # Flattened size: 7 * 7 * 64 = 3136
         self.flatten_size = 7 * 7 * 64
         
         # Fully connected layer
@@ -68,9 +66,6 @@ class NatureCNN(nn.Module):
 class ImpalaCNN(nn.Module):
     """
     IMPALA-style CNN with residual blocks (Espeholt et al., 2018).
-    
-    Deeper architecture for more complex visual feature extraction.
-    Better for environments requiring fine-grained visual understanding.
     """
     
     def __init__(self, in_channels=4, output_dim=512):
@@ -88,7 +83,6 @@ class ImpalaCNN(nn.Module):
                 nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
             )
         
-        # Stage 1
         self.stage1 = nn.Sequential(
             nn.Conv2d(in_channels, 16, kernel_size=3, stride=1, padding=1),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
@@ -96,7 +90,6 @@ class ImpalaCNN(nn.Module):
             residual_block(16, 16),
         )
         
-        # Stage 2
         self.stage2 = nn.Sequential(
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
@@ -104,15 +97,13 @@ class ImpalaCNN(nn.Module):
             residual_block(32, 32),
         )
         
-        # Stage 3
         self.stage3 = nn.Sequential(
             nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             residual_block(32, 32),
             residual_block(32, 32),
         )
-        
-        # After 3 pooling layers: 84 -> 42 -> 21 -> 11
+
         self.flatten_size = 32 * 11 * 11  # 3872
         
         # Fully connected
@@ -226,6 +217,44 @@ def test_cnn_encoder():
     
     print("\n✅ All tests passed!")
     print("="*60)
+
+
+class CNNWrapper(nn.Module):
+    """
+    Wrapper to handle pixel observation reshaping for CNN encoders.
+    """
+
+    def __init__(self, cnn_encoder, module):
+        super().__init__()
+        self.cnn_encoder = cnn_encoder
+        self.module = module
+
+        # Store expected shapes
+        self.in_channels = cnn_encoder.in_channels
+        self.frame_size = 84
+        self.flat_dim = self.in_channels * self.frame_size * self.frame_size  # 28224
+
+    def forward(self, obs, *args, **kwargs):
+        """
+        Forward pass with automatic reshaping.
+
+        Args:
+            obs: Input observations, either (B, 28224) flat or already (B, 4, 84, 84)
+            *args: Additional arguments to pass to module
+            **kwargs: Additional keyword arguments to pass to module
+        """
+        # Handle different input shapes
+        if obs.ndim == 2:
+            batch_size = obs.shape[0]
+            # Reshape: (B, 28224) -> (B, 4, 84, 84)
+            obs_4d = obs.reshape(batch_size, self.in_channels, self.frame_size, self.frame_size)
+            features = self.cnn_encoder(obs_4d)
+        elif obs.ndim == 4:
+            features = self.cnn_encoder(obs)
+        else:
+            raise ValueError(f"Unexpected input shape: {obs.shape}. Expected (B, {self.flat_dim}) or (B, {self.in_channels}, {self.frame_size}, {self.frame_size})")
+
+        return self.module(features, *args, **kwargs)
 
 
 if __name__ == '__main__':

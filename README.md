@@ -1,84 +1,94 @@
-# Can a MISL Fly? Analysis and Ingredients for Mutual Information Skill Learning
-Official code repo for the paper "Can a MISL Fly? Analysis and Ingredients for Mutual Information Skill Learning" by [Chongyi Zheng](https://chongyi-zheng.github.io), [Jens Tuyls](https://jens321.github.io), [Joanne Peng](https://www.joannepeng.com), and [Benjamin Eysenbach](https://ben-eysenbach.github.io). This paper introduces a new method which we call **Contrastive Successor Features (CSF)**, which achieves compareable performance to current SOTA unsupervised skill discovery methods while at its core relying on mutual information maximization.
+# Skill Discovery on Montezuma's Revenge
 
-## Installation 🔌
+Training and evaluation code for METRA, CSF, VISR, and DADS on Atari (Montezuma's Revenge, Room 1).
 
-After cloning this repo, please run the following commands at the root of the project:
-```
-# Setting up the conda environment
-conda create --name csf python=3.9
+## Requirements
+
+- Python 3.9+
+- See `requirements.txt` for full dependency list
+
+## Setup
+
+Create a new environment and install dependencies:
+
+```bash
+conda create -n csf python=3.9
 conda activate csf
-
-# Installing dependencies
-pip install -r requirements.txt --no-deps
-pip install -e .
-pip install -e garaged
-pip install --upgrade joblib
-pip install patchelf
+pip install -r requirements.txt
 ```
 
-> [!WARNING] 
-> Pip might complain about incompatible versions -- this is expected and can be safely ignored.
+Install Atari ROMs (required to run the environments):
 
-Next, we need to do some Mujoco setup.
-```
-conda activate csf
-conda install -c conda-forge glew
-conda install -c conda-forge mesalib
-conda install -c anaconda mesa-libgl-cos6-x86_64
-conda install -c menpo glfw3
+```bash
+pip install gym[atari,accept-rom-license]
 ```
 
-We also need to tell Mujoco which backend to use. This can be done by setting the appropriate environment variables.
-```
-conda env config vars set MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
-conda deactivate && conda activate csf
+Or, if you already have ROM files locally:
+
+```bash
+ale-import-roms /path/to/your/roms
 ```
 
-If you don't already have Mujoco, you will need it. Install Mujoco in a folder called `.mujoco`. More instructions on how to do so are linked [here](https://pytorch.org/rl/main/reference/generated/knowledge_base/MUJOCO_INSTALLATION.html).
+**Apple Silicon note:** the `requirements.txt` pins `tensorflow-macos`. On Linux/Windows, replace it with `tensorflow`.
 
-Finally, you may want to add the following environment variables to your `.bashrc` file:
-```
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/your/.mujoco/mujoco210/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
-export CPATH=$CONDA_PREFIX/include
-```
+## Training
 
-Remember to source your `.bashrc` file after changing it: `source ~/.bashrc`.
+Training scripts live in `scripts/Atari Training Scripts/`. Run the script for the method you want:
 
-## Running Experiments 🏃‍♂️
-
-(1) For **unsupervised pretraining** (state coverage), you can use the following general command. Make sure to run this from the root of the project.
-```
-sh scripts/pretrain/[method_name]/[method_name]_[env_name].sh
-```
-For example, in order to run our CSF method on the Ant environment, you would run:
-```
-sh scripts/pretrain/csf/csf_ant.sh
+```bash
+bash "scripts/Atari Training Scripts/run_montezuma_metra.sh"
+bash "scripts/Atari Training Scripts/run_montezuma_csf.sh"
+bash "scripts/Atari Training Scripts/run_montezuma_visr.sh"
+bash "scripts/Atari Training Scripts/run_montezuma_dads.sh"
 ```
 
-> [!NOTE] 
-> The zero-shot goal reaching performance gets logged during the pretraining phase, and hence we don't have separate scripts for them.
+There is also `run_mspacman.sh` for Ms. Pac-Man training.
 
-(2) For **hierarchical control**, you can use the following general command. Again, make sure to run this from the root of the project.
-```
-sh scripts/hierarchical_control/[task].sh [method_name]
-```
-For example, in order to run a pretrained CSF policy on the AntMultiGoal environment, you would run:
-```
-sh scripts/hierarchical_control/ant_multi_goal.sh csf
-```
-
-> [!WARNING]
-> All hierarchical control experiments require a pretrained policy path referred to using the `cp_path` argument. 
-> Make sure to update this in the corresponding scripts.
+Each script writes outputs to `exp/<env>/<run_id>/`, including periodic checkpoints.
 
 Once experiments are running, they will be logged under the `exp` folder.
 
-> [!NOTE] 
-> All experiments were run on a single GPU, usually with between 8 - 10 workers (see the `--n_parallel` flag).
-> In addition, we found we needed 32GB of CPU memory (RAM) for all state-based experiments (Ant and HalfCheetah), while
-> we needed 40GB of CPU memory for all image-based experiments (Humanoid, Quadruped, Kitchen, Robobin).
+## Evaluation
+
+Use `evaluate_skills.py` to produce plots, skill visualisations, and state coverage results from a trained checkpoint.
+
+The evaluator has two modes:
+
+- **deterministic** — fixed seed, fixed start conditions. Tests whether skills are genuinely distinct when everything is controlled.
+- **randomised** — multiple seeds, randomised noops. Tests whether skills stay distinct under perturbation.
+
+### Examples
+
+Run both modes on epoch 500:
+
+```bash
+python evaluate_skills.py \
+    --exp_dir exp/MontezumaRoom1-v2/sd000_1771641141_montezuma_room1_metra \
+    --checkpoint_epoch 500 \
+    --episodes_per_option 5
+```
+
+Deterministic only:
+
+```bash
+python evaluate_skills.py \
+    --exp_dir exp/MontezumaRoom1-v2/sd000_1771641141_montezuma_room1_metra \
+    --checkpoint_epoch 500 \
+    --mode deterministic
+```
+
+Compare across multiple checkpoints:
+
+```bash
+python evaluate_skills.py \
+    --exp_dir exp/MontezumaRoom1-v2/sd000_1771641141_montezuma_room1_metra \
+    --checkpoint_epoch 100 200 400 600 \
+    --mode deterministic \
+    --episodes_per_option 3
+```
+
 
 ## Acknowledgements
-This code repo was built on the original [METRA repo](https://github.com/seohongpark/METRA).
+
+This code repo was built on the original [CSF repo](https://github.com/Princeton-RL/contrastive-successor-features).
+

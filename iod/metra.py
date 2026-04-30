@@ -29,6 +29,7 @@ class METRA(IOD):
             tau: float,
             scale_reward: float,
             target_coef: float,
+            alpha_min: float = None,
             replay_buffer: PathBufferEx,
             min_buffer_size: int,
             inner: bool,
@@ -126,7 +127,6 @@ class METRA(IOD):
             log_alpha=self.log_alpha,
         )
 
-        # Register CNN in param_modules so gradient norms are logged correctly
         if self._use_cnn_encoder:
             self.param_modules['cnn'] = self.cnn_encoder
 
@@ -142,6 +142,12 @@ class METRA(IOD):
 
         self.use_discrete_sac = use_discrete_sac    
         self._reward_scale_factor = scale_reward
+        self._alpha_min = alpha_min
+        if self._alpha_min is not None:
+            self._log_alpha_min = np.log(self._alpha_min)
+            print(f"[METRA] Alpha floor enabled: alpha >= {self._alpha_min} (log_alpha >= {self._log_alpha_min:.4f})")
+        else:
+            self._log_alpha_min = None
         if self.use_discrete_sac:
             self._target_entropy = np.log(self._env_spec.action_space.n) * target_coef
         else:
@@ -441,13 +447,9 @@ class METRA(IOD):
             train_store (Dict): dictionary to store training losses
             mini_batch (Dict): dictionary containing the mini batch data
         """
-        # Note: We do NOT encode observations here anymore.
-        # Each component (_update_loss_qf, _update_loss_op) will encode observations
-        # as needed, to avoid issues with computation graph being freed after first backward.
-        
+
         # Compute hybrid rewards if using intrinsic component
         if self._alpha_intrinsic > 0:
-            # For intrinsic rewards, we need encoded observations (detached — no grad needed)
             obs_encoded = self._encode_obs(mini_batch['obs'], detach=True)
             intrinsic_rewards = self._compute_intrinsic_reward(obs_encoded, mini_batch['options'])
             # Add to training store for logging
@@ -460,7 +462,7 @@ class METRA(IOD):
         # Compute Q function loss
         self._update_loss_qf(train_store, mini_batch)
 
-        # Update Q networks only (not CNN - CNN will be updated from policy loss)
+        # Update Q networks
         self._gradient_descent(
             train_store['LossQf1'] + train_store['LossQf2'],
             optimizer_keys=['qf'],
@@ -469,7 +471,7 @@ class METRA(IOD):
         # Compute policy loss
         self._update_loss_op(train_store, mini_batch)
 
-        # Update policy only (not CNN - CNN is updated from trajectory encoder loss)
+        # Update policy
         self._gradient_descent(
             train_store['LossSacp'],
             optimizer_keys=['option_policy'],
@@ -484,6 +486,11 @@ class METRA(IOD):
             optimizer_keys=['log_alpha'],
         )
 
+        # Enforce alpha floor: prevent alpha from collapsing to near-zero
+        if self._log_alpha_min is not None:
+            with torch.no_grad():
+                self.log_alpha.param.data.clamp_(min=self._log_alpha_min)
+
         # Update target networks
         sac_utils.update_targets(self)
 
@@ -497,18 +504,13 @@ class METRA(IOD):
         obs = mini_batch['obs']
         next_obs = mini_batch['next_obs']
         
-        # Encode observations — NOT detached: METRA loss trains the CNN
-        obs = self._encode_obs(obs, detach=False)
-        next_obs = self._encode_obs(next_obs, detach=False)
+        # Encode observations through CNN: METRA loss trains the CNN
+        obs_enc = self._encode_obs(obs, detach=False)
+        next_obs_enc = self._encode_obs(next_obs, detach=False)
 
         if self.inner:
-            cur_z = self.traj_encoder(obs).mean
-            next_z = self.traj_encoder(next_obs).mean
-
-            # No normalization or clamping here — phi norms are controlled
-            # by a lightweight regularization term in _update_loss_te (weight=0.01).
-            # This allows phi to grow freely during early training while the
-            # dual constraint shapes the representation.
+            cur_z = self.traj_encoder(obs_enc).mean
+            next_z = self.traj_encoder(next_obs_enc).mean
 
             target_z = next_z - cur_z
 
@@ -531,13 +533,9 @@ class METRA(IOD):
             if self.discrete:
                 masks = (mini_batch['options'] - mini_batch['options'].mean(dim=1, keepdim=True)) * self.dim_option / (self.dim_option - 1 if self.dim_option != 1 else 1)
                 rewards = (target_z * masks).sum(dim=1)
-                # NO reward scaling — matching original METRA paper.
-                # The dual constraint controls the magnitude of phi_diff,
-                # so rewards are naturally well-scaled.
             else:
                 inner = (target_z * mini_batch['options']).sum(dim=1)
                 rewards = inner
-                # NO reward scaling — matching original METRA paper.
 
             # Store TWO versions of phi representations:
             # 1. Non-detached for METRA loss (shapes representation via skill discovery)
@@ -551,13 +549,8 @@ class METRA(IOD):
 
         elif self.metra_mlp_rep:
             # unneccessary but avoids key errors for now
-            cur_z = self.traj_encoder(obs).mean
-            next_z = self.traj_encoder(next_obs).mean
-
-            # NO unit normalization — matching original METRA paper.
-            # Dual constraint controls phi norms.
-            
-            # Store detached versions for Q-functions (prevent collapse)
+            cur_z = self.traj_encoder(obs_enc).mean
+            next_z = self.traj_encoder(next_obs_enc).mean
             mini_batch.update({
                 'cur_z': cur_z,
                 'next_z': next_z,
@@ -565,7 +558,7 @@ class METRA(IOD):
                 'next_z_detached': next_z.detach(),
             })
 
-            rep = self.f_encoder(obs, next_obs)
+            rep = self.f_encoder(obs_enc, next_obs_enc)
             rewards = (rep * mini_batch['options']).sum(dim=1)
 
             if self.log_sum_exp:
@@ -579,7 +572,7 @@ class METRA(IOD):
                 log_sum_exp = torch.logsumexp(pairwise_scores, dim=-1)
 
         else:
-            target_dists = self.traj_encoder(next_obs)
+            target_dists = self.traj_encoder(next_obs_enc)
 
             if self.discrete:
                 logits = target_dists.mean
@@ -653,15 +646,13 @@ class METRA(IOD):
 
         loss_te = -te_obj.mean()
 
-        # Phi norm regularization: lightweight safety net to prevent explosion.
-        # Weight 0.01 is small enough to not interfere with METRA learning
-        # (te_obj ≈ 0.03) but large enough to catch runaway norms (20+).
-        # Previous weight of 0.5 was too aggressive — it pinned ||phi||=1.0
-        # so tightly that phi_diff couldn't grow (same failure as unit norm).
-        phi_norm_x = torch.norm(phi_x, dim=1)
-        phi_norm_y = torch.norm(phi_y, dim=1)
-        phi_norm_reg = ((phi_norm_x - 1.0) ** 2).mean() + ((phi_norm_y - 1.0) ** 2).mean()
-        loss_te = loss_te + 0.01 * phi_norm_reg
+        if self.dual_reg:
+            phi_norm_x = torch.norm(phi_x, dim=1)
+            phi_norm_y = torch.norm(phi_y, dim=1)
+            phi_norm_reg = ((phi_norm_x - 1.0) ** 2).mean() + ((phi_norm_y - 1.0) ** 2).mean()
+            loss_te = loss_te + 0.01 * phi_norm_reg
+        else:
+            phi_norm_reg = torch.tensor(0.0, device=te_obj.device)
 
         train_store.update({
             'TeObjMean': te_obj.mean(),
@@ -704,8 +695,6 @@ class METRA(IOD):
 
         # Add the log sum exp term to the rewards if using
         if self.add_log_sum_exp_to_rewards:
-            # CRITICAL: Use DETACHED phi for Q-function computation
-            # This prevents critic from affecting encoder gradients
             target_z = mini_batch['next_z_detached'] - mini_batch['cur_z_detached']
             if self.sample_new_z:
                 new_z = torch.randn(self.num_negative_z, self.dim_option, device=mini_batch['options'].device)
@@ -720,7 +709,6 @@ class METRA(IOD):
 
         # Add the METRA penalty term to the rewards if using
         if self.add_penalty_to_rewards:
-            # CRITICAL: Use DETACHED phi for Q-function computation
             x = mini_batch['obs']
             phi_x = mini_batch['cur_z_detached']
             phi_y = mini_batch['next_z_detached']
@@ -754,7 +742,7 @@ class METRA(IOD):
             train_store (Dict[str, Any]): train store
             mini_batch (Dict[str, Any]): mini batch data
         """
-        # Encode observations — DETACHED so policy cannot train CNN
+        # Encode observations
         obs = self._encode_obs(mini_batch['obs'], detach=True)
         
         # Concatenate with options
@@ -853,7 +841,6 @@ class METRA(IOD):
         if last_obs.ndim > 2:
             last_obs = last_obs.flatten(start_dim=1)
         
-        # CRITICAL: Encode observations through CNN if enabled
         last_obs = self._encode_obs(last_obs)
         
         option_dists = self.traj_encoder(last_obs)

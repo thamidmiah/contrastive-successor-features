@@ -1,0 +1,44 @@
+RESUME_DIR="exp/Montezuma-CSF-Dim8-2/sd000_1773322197_montezuma_room1_metra_sf"
+
+python run/train.py \
+    --run_group "Montezuma-CSF-Dim8-2" \
+    --resume_from "$RESUME_DIR" \
+    --resume_epoch 500 \
+    --env "montezuma_room1" \
+    --algo "metra_sf" \
+    --max_path_length 500 \
+    --dim_option 8 \
+    --discrete 1 \
+    --inner 1 \
+    --unit_length 0 \
+    --num_random_trajectories 48 \
+    --model_master_dim 512 \
+    --model_master_num_layers 2 \
+    --use_cnn_encoder 1 \
+    --cnn_type "nature" \
+    --frame_stack 4 \
+    --n_epochs 10000 \
+    --n_epochs_per_eval 100 \
+    --n_epochs_per_log 10 \
+    --n_epochs_per_save 100 \
+    --traj_batch_size 8 \
+    --trans_minibatch_size 128 \
+    --trans_optimization_epochs 30 \
+    --alpha 0.05 \
+    --alpha_min 0.05 \
+    --sac_scale_reward 1.0 \
+    --sac_target_coef 0.5 \
+    --sac_discount 0.99 \
+    --sac_tau 5e-3 \
+    --sac_min_buffer_size 2000 \
+    --sac_max_buffer_size 20000 \
+    --common_lr 1e-4 \
+    --no_diff_in_rep 1 \
+    --self_normalizing 1 \
+    --turn_off_dones 1 \
+    --n_parallel 1 \
+    --eval_plot_axis -1 \
+    --use_discrete_sac 1 \
+    --use_gpu 0 \
+    --sample_cpu 1 \
+    --seed 0

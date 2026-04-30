@@ -10,7 +10,9 @@ import dowel
 import argparse
 import datetime
 import functools
+import glob
 import os
+import pickle
 import platform
 import torch.multiprocessing as mp
 
@@ -149,8 +151,19 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         )
         cp_num_truncate_obs = 2
     
+    elif args.env == 'montezuma_room1':
+        # Montezuma's Revenge constrained to Room 1 for skill discovery
+        from envs.atari.atari_env import AtariEnv
+        from envs.atari.montezuma_room1_wrapper import MontezumaRoom1Wrapper
+        frame_stack = args.frame_stack if args.frame_stack is not None else 4
+        base_env = AtariEnv(game='MontezumaRevenge', frame_stack=frame_stack, normalize_pixels=True)
+        env = MontezumaRoom1Wrapper(base_env)
+        normalizer_type = 'off'  # No normalization for pixel observations
+        # Atari envs have discrete action spaces — force discrete SAC
+        args.use_discrete_sac = 1
+
     elif args.env.startswith('atari_'):
-        # NEW: Atari environment support
+        # Atari environment support
         from envs.atari.atari_env import AtariEnv
         game_name = args.env.replace('atari_', '').replace('_', ' ').title().replace(' ', '')
         
@@ -161,12 +174,16 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
         frame_stack = args.frame_stack if args.frame_stack is not None else 4
         env = AtariEnv(game=game_name, frame_stack=frame_stack, normalize_pixels=True)
         normalizer_type = 'off'  # No normalization for pixel observations
+        # Atari envs have discrete action spaces — force discrete SAC
+        args.use_discrete_sac = 1
     
     else:
         raise NotImplementedError
 
-    # Only apply external frame stacking for non-Atari environments  
-    if args.frame_stack is not None and not args.env.startswith('atari_'):
+    # Only apply external frame stacking for non-Atari environments
+    # (Atari/Montezuma handle frame stacking internally in AtariEnv)
+    is_atari_env = args.env.startswith('atari_') or args.env == 'montezuma_room1'
+    if args.frame_stack is not None and not is_atari_env:
         from envs.custom_dmc_tasks.pixel_wrappers import FrameStackWrapper
         env = FrameStackWrapper(env, args.frame_stack)
 
@@ -174,8 +191,8 @@ def make_env(args: argparse.Namespace, max_path_length: int) -> Any:
     normalizer_type = args.normalizer_type
     normalizer_kwargs = {}
     
-    # Don't flatten observations for Atari (keep 3D structure for CNN)
-    if args.env.startswith('atari_'):
+    # Don't flatten observations for Atari / Montezuma (keep 3D structure for CNN)
+    if args.env.startswith('atari_') or args.env == 'montezuma_room1':
         normalizer_kwargs['flatten_obs'] = False
 
     if normalizer_type == 'off':
@@ -260,7 +277,8 @@ def get_argparser():
         # Hierarchical control environments
         'ant_nav_prime', 'half_cheetah_hurdle', 'half_cheetah_goal', 'dmc_quadruped_goal', 'dmc_humanoid_goal',
         # Atari environments
-        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge', 'atari_mspacman'
+        'atari_breakout', 'atari_pong', 'atari_seaquest', 'atari_montezuma_revenge', 'atari_mspacman',
+        'montezuma_room1',
     ])
 
     # Training
@@ -277,10 +295,21 @@ def get_argparser():
     parser.add_argument('--lr_op', type=float, default=None, help="Potential overwrite for the learning rate for the policy parameters.")
     parser.add_argument('--lr_te', type=float, default=None, help="Potential overwrite for the learning rate for the trajectory encoder parameters.")
 
+    # Resume from checkpoint
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help="Path to snapshot directory to resume from (e.g. exp/MyRun/sd000_.../). "
+                             "Loads network weights, optimizer states, and replay buffer from the checkpoint. "
+                             "New hyperparams (dual_slack, alpha_min, etc.) come from the CLI, not the checkpoint.")
+    parser.add_argument('--resume_epoch', type=int, default=None,
+                        help="Epoch to resume from. If None, loads the latest available checkpoint. "
+                             "Training runs from resume_epoch to n_epochs (so set n_epochs to "
+                             "resume_epoch + desired_additional_epochs).")
+
     # General algorithmic parameters
     parser.add_argument('--dim_option', type=int, default=2, help="Specifies the skill dimension.")
     parser.add_argument('--discrete', type=int, default=0, choices=[0, 1], help="Specifies whether to use discrete or continuous skills.")
     parser.add_argument('--alpha', type=float, default=0.01, help="Specifies the entropy coefficient (initial value if adaptive).")
+    parser.add_argument('--alpha_min', type=float, default=None, help="Minimum alpha (entropy coefficient) floor. Prevents alpha from collapsing to near-zero, which kills exploration. Recommended: 0.01 for Atari.")
     parser.add_argument('--algo', type=str, default='metra', choices=[
         # CSF (our method) & skill discovery baseliens
         'metra', 'metra_sf', 'dads', 'cic',
@@ -404,7 +433,17 @@ def run(ctxt=None):
         pixel_shape = None
 
     # Setup device
-    device = torch.device('cuda' if args.use_gpu else 'cpu')
+    if args.use_gpu:
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device('mps')
+        else:
+            print("[WARNING] GPU requested but neither CUDA nor MPS available. Falling back to CPU.")
+            device = torch.device('cpu')
+    else:
+        device = torch.device('cpu')
+    print(f"[Setup] Using device: {device}")
 
     # Hidden sizes for all following networks
     master_dims = [args.model_master_dim] * args.model_master_num_layers
@@ -538,7 +577,14 @@ def run(ctxt=None):
             te_encoder = make_encoder(spectral_normalization=True)
         else:
             te_encoder = None
-        traj_encoder = with_encoder(traj_encoder, encoder=te_encoder)    
+        traj_encoder = with_encoder(traj_encoder, encoder=te_encoder)
+
+    # Assign shared CNN encoder to traj_encoder's preprocessor (if using CNN)
+    # NOTE: We do NOT wrap traj_encoder in CNNWrapper.  Instead, _encode_obs()
+    # is called before every traj_encoder() call (in _update_rewards, _evaluate_policy, etc.)
+    # This avoids double-encoding and keeps _encode_obs as the single source of truth.
+    if shared_cnn_encoder is not None:
+        print(f"[Setup] traj_encoder is a plain MLP (512 → {output_dim}); CNN encoding handled by _encode_obs()")    
 
 
     # ********************
@@ -566,7 +612,9 @@ def run(ctxt=None):
     # Setup skill dynamics
     # ********************
     sd_dim_option = args.dim_option
-    skill_dynamics_obs_dim = obs_dim
+    # When using CNN encoder, skill dynamics operates on CNN-encoded obs (512-dim)
+    # not raw pixels (28224-dim). This keeps the MLP tractable.
+    skill_dynamics_obs_dim = 512 if args.use_cnn_encoder else obs_dim
     skill_dynamics_input_dim = skill_dynamics_obs_dim + sd_dim_option
     module_cls, module_kwargs = get_gaussian_module_construction(
         args,
@@ -721,18 +769,11 @@ def run(ctxt=None):
                 {'params': log_alpha.parameters(), 'lr': _finalize_lr(args.sac_lr_a)},
             ])
         })
-    
-    # Add CNN optimizer if using CNN encoder
-    if shared_cnn_encoder is not None:
-        optimizers.update({
-            'cnn': torch.optim.Adam([
-                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
-            ])
-        })
-        print(f"[Setup] Added CNN optimizer with learning rate {_finalize_lr(args.sac_lr_q)}")
-    
-    # NOTE: for metra_sf, the q networks are really just the "psi" successor features that 
+
+    # NOTE: for metra_sf, the q networks are really just the "psi" successor features that
     # are learned in the same way as the q functions in the other algorithms
+    # For metra_sf, we always use ContinuousMLPQFunctionEx even for discrete actions
+    # because the SF network outputs a feature vector (dim_option), not action-values
     elif args.algo == 'metra_sf':
         qf1 = ContinuousMLPQFunctionEx(
             obs_dim=policy_q_input_dim,
@@ -763,15 +804,6 @@ def run(ctxt=None):
                 {'params': log_alpha.parameters(), 'lr': _finalize_lr(args.sac_lr_a)},
             ])
         })
-    
-    # Add CNN optimizer if using CNN encoder (for metra_sf case)
-    if shared_cnn_encoder is not None and args.algo == 'metra_sf':
-        optimizers.update({
-            'cnn': torch.optim.Adam([
-                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
-            ])
-        })
-        print(f"[Setup] Added CNN optimizer (metra_sf) with learning rate {_finalize_lr(args.sac_lr_q)}")
 
     elif args.algo == 'ppo':
         # TODO: Currently not support pixel obs
@@ -787,6 +819,15 @@ def run(ctxt=None):
                 {'params': vf.parameters(), 'lr': _finalize_lr(args.lr_op)},
             ]),
         })
+
+    # Add CNN optimizer if using CNN encoder (must come after all algorithm-specific Q network setup)
+    if shared_cnn_encoder is not None:
+        optimizers.update({
+            'cnn': torch.optim.Adam([
+                {'params': shared_cnn_encoder.parameters(), 'lr': _finalize_lr(args.sac_lr_q)},
+            ])
+        })
+        print(f"[Setup] Added CNN optimizer with learning rate {_finalize_lr(args.sac_lr_q)}")
 
     # This is for the parametrization ablation, where we use the encoding f(s, s')^T z
     f_encoder = None
@@ -855,6 +896,7 @@ def run(ctxt=None):
         tau=args.sac_tau,
         scale_reward=args.sac_scale_reward,
         target_coef=args.sac_target_coef,
+        alpha_min=args.alpha_min,
 
         replay_buffer=replay_buffer,
         min_buffer_size=args.sac_min_buffer_size,
@@ -937,6 +979,17 @@ def run(ctxt=None):
             dual_slack=args.dual_slack,
             dual_dist=args.dual_dist,
         )
+        
+        # Add CNN parameters if using CNN encoder (same as METRA branch)
+        if args.use_cnn_encoder:
+            algo_kwargs.update(
+                use_cnn_encoder=True,
+                cnn_type=args.cnn_type,
+                alpha_intrinsic=args.alpha_intrinsic,
+                cnn_learning_rate=args.common_lr,
+                cnn_encoder=shared_cnn_encoder,
+            )
+        
         algo = MetraSf(
             **algo_kwargs,
             **skill_common_args,
@@ -1006,6 +1059,16 @@ def run(ctxt=None):
             uniform_z=args.uniform_z,
         )
 
+        # Add CNN parameters if using CNN encoder (same as METRA/MetraSf)
+        if args.use_cnn_encoder:
+            algo_kwargs.update(
+                use_cnn_encoder=True,
+                cnn_type=args.cnn_type,
+                alpha_intrinsic=args.alpha_intrinsic,
+                cnn_learning_rate=args.common_lr,
+                cnn_encoder=shared_cnn_encoder,
+            )
+
         skill_common_args.update(
             inner=args.inner,
             num_alt_samples=args.num_alt_samples,
@@ -1046,6 +1109,118 @@ def run(ctxt=None):
         n_workers=args.n_parallel,
     )
     algo.option_policy.to(device)
+
+    # ── Resume from checkpoint ──────────────────────────────────────────
+    if args.resume_from is not None:
+        snapshot_dir = args.resume_from
+
+        # Find the checkpoint file
+        if args.resume_epoch is not None:
+            pkl_path = os.path.join(snapshot_dir, f'itr_{args.resume_epoch}.pkl')
+            if not os.path.exists(pkl_path):
+                raise FileNotFoundError(f"Checkpoint not found: {pkl_path}")
+            resume_epoch = args.resume_epoch
+        else:
+            # Find latest checkpoint
+            pkl_files = glob.glob(os.path.join(snapshot_dir, 'itr_*.pkl'))
+            # Exclude params.pkl, sort numerically
+            pkl_files = [f for f in pkl_files if os.path.basename(f).startswith('itr_')]
+            pkl_files.sort(key=lambda f: int(os.path.basename(f).replace('itr_', '').replace('.pkl', '')))
+            if not pkl_files:
+                raise FileNotFoundError(f"No itr_*.pkl checkpoints found in {snapshot_dir}")
+            pkl_path = pkl_files[-1]
+            resume_epoch = int(os.path.basename(pkl_path).replace('itr_', '').replace('.pkl', ''))
+
+        print(f"\n{'='*60}")
+        print(f"RESUMING FROM CHECKPOINT")
+        print(f"  Snapshot dir : {snapshot_dir}")
+        print(f"  Checkpoint   : {os.path.basename(pkl_path)}")
+        print(f"  Resume epoch : {resume_epoch}")
+        print(f"{'='*60}")
+
+        # Load checkpoint
+        with open(pkl_path, 'rb') as f:
+            checkpoint = pickle.load(f)
+
+        old_algo = checkpoint['algo']
+
+        # ── Copy neural network weights ──
+        modules_to_copy = [
+            ('option_policy', 'option_policy'),
+            ('traj_encoder', 'traj_encoder'),
+            ('target_te', 'target_te'),
+            ('qf1', 'qf1'),
+            ('qf2', 'qf2'),
+            ('target_qf1', 'target_qf1'),
+            ('target_qf2', 'target_qf2'),
+            ('log_alpha', 'log_alpha'),
+            ('dual_lam', 'dual_lam'),
+        ]
+        for attr_name, label in modules_to_copy:
+            old_mod = getattr(old_algo, attr_name, None)
+            new_mod = getattr(algo, attr_name, None)
+            if old_mod is not None and new_mod is not None:
+                try:
+                    new_mod.load_state_dict(old_mod.state_dict())
+                    print(f"  ✓ Restored {label}")
+                except Exception as e:
+                    print(f"  ✗ Failed to restore {label}: {e}")
+
+        # ── Copy CNN encoder weights (if shared) ──
+        if hasattr(old_algo, 'cnn_encoder') and hasattr(algo, 'cnn_encoder'):
+            try:
+                algo.cnn_encoder.load_state_dict(old_algo.cnn_encoder.state_dict())
+                print(f"  ✓ Restored cnn_encoder")
+            except Exception as e:
+                print(f"  ✗ Failed to restore cnn_encoder: {e}")
+
+        # ── Copy optimizer states ──
+        if hasattr(old_algo, '_optimizer') and hasattr(algo, '_optimizer'):
+            old_optims = old_algo._optimizer._optimizers
+            new_optims = algo._optimizer._optimizers
+            for key in new_optims:
+                if key in old_optims:
+                    try:
+                        new_optims[key].load_state_dict(old_optims[key].state_dict())
+                        print(f"  ✓ Restored optimizer[{key}]")
+                    except Exception as e:
+                        print(f"  ✗ Failed to restore optimizer[{key}]: {e}")
+
+        # ── Seed replay buffer with checkpoint samples ──
+        # The full replay buffer is NOT saved in pkl (too large).
+        # Only a 10K sample is saved under 'replay_buffer_samples'.
+        # We seed the new buffer with these samples so training doesn't
+        # start completely cold.
+        replay_samples = checkpoint.get('replay_buffer_samples', None)
+        if replay_samples is not None and hasattr(algo, 'replay_buffer') and algo.replay_buffer is not None:
+            try:
+                # Add all samples as a single "path" into the buffer
+                algo.replay_buffer.add_path(replay_samples)
+                n_samples = len(replay_samples['actions'])
+                print(f"  ✓ Seeded replay buffer with {n_samples} samples from checkpoint")
+            except Exception as e:
+                print(f"  ⚠ Could not seed replay buffer: {e}")
+                print(f"    Buffer will refill naturally during training")
+        else:
+            print(f"  ⚠ No replay buffer samples in checkpoint — buffer starts empty")
+
+        # ── Set resume epoch on the algo so iod.train() can use it ──
+        algo._resume_start_epoch = resume_epoch
+
+        # Free checkpoint memory
+        del checkpoint, old_algo
+
+        print(f"\n  New hyperparams from CLI will be used:")
+        print(f"    dual_slack   = {algo.dual_slack}")
+        print(f"    alpha_min    = {getattr(algo, '_alpha_min', None)}")
+        if hasattr(algo, 'dual_lam'):
+            lam_val = algo.dual_lam.param.data.item() if hasattr(algo.dual_lam, 'param') else '?'
+            print(f"    dual_lam val = {lam_val:.4f}  (restored from checkpoint)")
+        if hasattr(algo, 'log_alpha'):
+            alpha_val = algo.log_alpha.param.data.exp().item() if hasattr(algo.log_alpha, 'param') else '?'
+            print(f"    alpha val    = {alpha_val:.6f}  (restored from checkpoint)")
+        print(f"    Training will continue from epoch {resume_epoch}")
+        print(f"{'='*60}\n")
 
     # Start training
     runner.train(n_epochs=args.n_epochs, batch_size=args.traj_batch_size)
