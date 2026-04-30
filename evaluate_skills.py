@@ -1,34 +1,4 @@
 #!/usr/bin/env python3
-"""
-Montezuma Room 1 — Proper Skill Evaluation Harness.
-
-Two evaluation modes:
-  A) DETERMINISTIC ("identity check")
-     - Fixed seed, noop=0 (or fixed noop_count)
-     - Same start conditions every time
-     - Answers: "Are skills actually different when everything is controlled?"
-
-  B) RANDOMISED ("robustness check")
-     - Multiple seeds, noop_max=30
-     - Answers: "Do skills remain distinct under perturbations?"
-
-Usage:
-  # Both modes, checkpoint epoch 500
-  python evaluate_skills.py \\
-      --exp_dir exp/MontezumaRoom1-v2/sd000_1771641141_montezuma_room1_metra \\
-      --checkpoint_epoch 500 \\
-      --episodes_per_option 5
-
-  # Deterministic only
-  python evaluate_skills.py \\
-      --exp_dir ... --checkpoint_epoch 500 --mode deterministic
-
-  # Specific checkpoint comparison
-  python evaluate_skills.py \\
-      --exp_dir ... --checkpoint_epoch 100 200 400 600 \\
-      --mode deterministic --episodes_per_option 3
-"""
-
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
