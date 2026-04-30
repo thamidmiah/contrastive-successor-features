@@ -31,7 +31,6 @@ python run/train.py \
   --dual_reg 1 \
   --dual_lam 24 \
   --dual_slack 1e-3 \
-  --turn_off_dones 0 \
   --n_parallel 8 \
   --eval_plot_axis -1 \
   --use_discrete_sac 1 \

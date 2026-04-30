@@ -10,7 +10,7 @@ python run/train.py \
     --dim_option 8 \
     --discrete 1 \
     --inner 1 \
-    --unit_length 0 \
+    --unit_length 1 \
     --num_random_trajectories 48 \
     --model_master_dim 512 \
     --model_master_num_layers 2 \

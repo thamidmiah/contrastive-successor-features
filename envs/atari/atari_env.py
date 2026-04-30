@@ -81,23 +81,6 @@ class EnvSpec:
 
 
 class AtariEnv(gym.Wrapper):
-    """
-    Atari environment wrapper with standard preprocessing.
-    
-    Applies standard Atari preprocessing:
-    - Grayscale conversion (optional)
-    - Resize to target resolution
-    - Frame stacking for temporal information
-    - Pixel normalization
-    
-    Args:
-        game: Name of the Atari game (e.g., 'Breakout', 'Pong')
-        screen_size: Target screen size (default: 84)
-        grayscale: Whether to convert to grayscale (default: True)
-        frame_stack: Number of frames to stack (default: 1, set to 4 for temporal info)
-        normalize_pixels: Whether to normalize pixels to [0, 1] (default: False)
-    """
-    
     def __init__(
         self,
         game='Breakout',
@@ -112,8 +95,7 @@ class AtariEnv(gym.Wrapper):
         
         print(f"[AtariEnv] Creating {game} environment with preprocessing:")
         print(f"  Original shape: {env.observation_space.shape}")
-        
-        # Apply preprocessing wrappers in order
+
         if grayscale:
             env = GrayscaleObservation(env, keep_dim=True)
             print(f"  After grayscale: {env.observation_space.shape}")
@@ -140,22 +122,19 @@ class AtariEnv(gym.Wrapper):
         
         if hasattr(dummy_obs, '__array__'):
             dummy_obs = np.array(dummy_obs)
-        
-        # Create observation space that matches actual observations
+
         actual_obs_space = Box(
             low=0.0 if normalize_pixels else 0,
             high=1.0 if normalize_pixels else 255,
             shape=dummy_obs.shape,
             dtype=np.float32 if normalize_pixels else np.uint8
         )
-        
-        # Create custom spec for compatibility with garage
+
         self._custom_spec = EnvSpec(
             observation_space=actual_obs_space,
             action_space=env.action_space
         )
-        
-        # Add flat_dim attributes that the codebase expects
+
         self._custom_spec.observation_space.flat_dim = int(np.prod(dummy_obs.shape))
         self._custom_spec.action_space.flat_dim = env.action_space.n
         
@@ -181,15 +160,8 @@ class AtariEnv(gym.Wrapper):
         return obs
     
     def step(self, action, **kwargs):
-        """Step the environment.
-        
-        Args:
-            action: The action to take
-            **kwargs: Additional keyword arguments (e.g., render) - ignored for Atari
-        """
         # Convert action to integer for discrete action spaces
         if isinstance(action, np.ndarray):
-            # Handle both single element and multi-element arrays
             if action.size == 1:
                 action = int(action.item())
             else:

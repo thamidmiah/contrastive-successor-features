@@ -12,8 +12,8 @@ Training and evaluation code for METRA, CSF, VISR, and DADS on Atari (Montezuma'
 Create a new environment and install dependencies:
 
 ```bash
-conda create -n csf python=3.9
-conda activate csf
+conda create -n training-env python=3.9
+conda activate training-env
 pip install -r requirements.txt
 ```
 

@@ -1,17 +1,3 @@
-#!/bin/bash
-# Montezuma's Revenge Room 1 — CSF (Contrastive Successor Features)
-#
-# CSF = SF backbone + InfoNCE contrastive term + dual constraint
-# Differences from ViSR (run_montezuma_room1.sh):
-#   --self_normalizing 0   → no unit sphere; InfoNCE separates skills
-#   --dual_reg 1           → METRA dual constraint to bound ||φ||
-#                            (without this OR self_normalizing, φ → ∞)
-#   --no_diff_in_rep 1     → φ(s')·z reward (displacement gives ~0 on Atari)
-#   --log_sum_exp 1        → InfoNCE contrastive loss
-#   --sample_new_z 1       → fresh negative z's each batch
-#   --num_negative_z 256   → number of negatives
-#   --infonce_lam 1.0      → contrastive weight
-
 python run/train.py \
     --run_group "Montezuma-CSF" \
     --env "montezuma_room1" \
@@ -44,9 +30,6 @@ python run/train.py \
     --common_lr 1e-4 \
     --no_diff_in_rep 1 \
     --self_normalizing 0 \
-    --dual_reg 1 \
-    --dual_lam 30 \
-    --dual_slack 1e-3 \
     --turn_off_dones 1 \
     --log_sum_exp 1 \
     --sample_new_z 1 \

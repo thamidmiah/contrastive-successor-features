@@ -1,13 +1,3 @@
-#!/bin/bash
-# Run MsPacman METRA with CNN Encoder (Phase 3)
-
-# Ensure we're in the csf conda environment
-source ~/.zshrc
-conda activate csf
-
-# Navigate to project directory
-cd "/Users/thamidmiah/Documents/ University of Bath/Bath CS/Year 3/Final year project/contrastive-successor-features"
-
 # Run training with CNN encoder enabled
 python run/train.py \
   --env atari_mspacman \
@@ -15,7 +5,7 @@ python run/train.py \
   --use_discrete_sac 1 \
   --use_cnn_encoder 1 \
   --cnn_type nature \
-  --dim_option 8 \
+  --dim_option 4 \
   --discrete 1 \
   --n_epochs 100 \
   --max_path_length 200 \
@@ -29,4 +19,6 @@ python run/train.py \
   --n_epochs_per_pt_save 25 \
   --n_epochs_per_log 25 \
   --run_group MsPacman_METRA \
-  --seed 100
+  --dual_reg 1 \
+  --dual_lam 24 \
+  --dual_slack 1e-3 \
